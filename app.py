@@ -1,4 +1,4 @@
-"""StockMind-AI: um produto, um modelo simples e previsão de sete dias."""
+"""StockMind-AI: comparação simples de previsões de sete dias para um produto."""
 
 import math
 from pathlib import Path
@@ -7,6 +7,14 @@ import pandas as pd
 import streamlit as st
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
+
+
+MODELOS = (
+    "Última venda",
+    "Semana anterior",
+    "Regressão linear",
+    "Regressão com dia da semana",
+)
 
 
 def carregar_vendas(arquivo):
@@ -46,33 +54,69 @@ def carregar_vendas(arquivo):
     return dados
 
 
+def criar_atributos(datas, inicio, incluir_semana):
+    """Calendário conhecido: tendência e seis indicadores de dia da semana."""
+    datas = pd.DatetimeIndex(datas)
+    atributos = pd.DataFrame({"dia": (datas - inicio).days})
+    if incluir_semana:
+        # Segunda-feira é a referência. Indicadores evitam tratar domingo como
+        # uma quantidade seis vezes maior que terça-feira.
+        for dia in range(1, 7):
+            atributos[f"dia_semana_{dia}"] = (datas.dayofweek == dia).astype(int)
+    return atributos
+
+
+def prever_com_modelo(dados, nome):
+    """Prevê sete dias usando somente o histórico recebido."""
+    if nome == "Última venda":
+        return [float(dados["vendas"].iloc[-1])] * 7
+    if nome == "Semana anterior":
+        return dados["vendas"].iloc[-7:].astype(float).tolist()
+    if nome not in MODELOS:
+        raise ValueError("Modelo desconhecido.")
+
+    inicio = dados["data"].iloc[0]
+    futuro = pd.date_range(dados["data"].iloc[-1] + pd.Timedelta(days=1), periods=7)
+    incluir_semana = nome == "Regressão com dia da semana"
+    treino = criar_atributos(dados["data"], inicio, incluir_semana)
+    atributos_futuros = criar_atributos(futuro, inicio, incluir_semana)
+    modelo = LinearRegression().fit(treino, dados["vendas"])
+    return modelo.predict(atributos_futuros).clip(min=0).tolist()
+
+
 def prever_vendas(dados):
-    """Avalia no passado, depois reajusta com todo o histórico para prever."""
-    dias = pd.DataFrame({"dia": range(len(dados))})
-    vendas = dados["vendas"]
-    modelo = LinearRegression()
+    """Seleciona na validação, avalia no teste e reajusta para a previsão futura."""
+    comparacao = []
+    escolhido = None
+    menor_erro = math.inf
+    for nome in MODELOS:
+        # Validação: penúltima semana. A última semana não participa da escolha.
+        validacao = prever_com_modelo(dados.iloc[:-14], nome)
+        erro_validacao = float(
+            mean_absolute_error(dados["vendas"].iloc[-14:-7], validacao)
+        )
+        # Teste final: reajusta apenas nos dados anteriores à última semana.
+        teste = prever_com_modelo(dados.iloc[:-7], nome)
+        erro_teste = float(mean_absolute_error(dados["vendas"].iloc[-7:], teste))
+        comparacao.append(
+            {"modelo": nome, "mae_validacao": erro_validacao, "mae_teste": erro_teste}
+        )
+        # Empates numéricos favorecem os métodos mais simples, listados primeiro.
+        if escolhido is None or erro_validacao < menor_erro - 1e-9:
+            escolhido, menor_erro = nome, erro_validacao
 
-    # Últimos sete dias ficam fora do treinamento nesta avaliação.
-    modelo.fit(dias.iloc[:-7], vendas.iloc[:-7])
-    estimativa_teste = modelo.predict(dias.iloc[-7:]).clip(min=0)
-    erro_modelo = float(mean_absolute_error(vendas.iloc[-7:], estimativa_teste))
-
-    # Referência: prever sempre o último valor conhecido antes da semana de teste.
-    referencia = [vendas.iloc[-8]] * 7
-    erro_referencia = float(mean_absolute_error(vendas.iloc[-7:], referencia))
-
-    # Agora usa todo o histórico disponível para prever os próximos sete dias.
-    modelo.fit(dias, vendas)
-    dias_futuros = pd.DataFrame({"dia": range(len(dados), len(dados) + 7)})
+    avaliacao = pd.DataFrame(comparacao)
+    avaliacao["selecionado"] = avaliacao["modelo"].eq(escolhido)
+    # Só agora o método escolhido recebe todo o histórico para prever o futuro.
     previsao = pd.DataFrame(
         {
             "data": pd.date_range(
                 dados["data"].iloc[-1] + pd.Timedelta(days=1), periods=7
             ),
-            "previsao": modelo.predict(dias_futuros).clip(min=0),
+            "previsao": prever_com_modelo(dados, escolhido),
         }
     )
-    return previsao, erro_modelo, erro_referencia
+    return previsao, avaliacao
 
 
 def main():
@@ -98,10 +142,14 @@ def main():
         st.error(str(erro))
         st.stop()
 
-    previsao, erro, erro_referencia = prever_vendas(dados)
+    previsao, avaliacao = prever_vendas(dados)
+    escolhido = avaliacao.loc[avaliacao["selecionado"], "modelo"].iloc[0]
     st.caption(
         f"Último dia do histórico: {dados['data'].iloc[-1]:%d/%m/%Y}. "
         "A previsão começa no dia seguinte a essa data."
+    )
+    st.info(
+        f"Método usado na previsão: {escolhido}. Escolhido pelo menor erro de validação."
     )
     historico = dados.set_index("data")["vendas"].rename("Vendas registradas")
     futuro = previsao.set_index("data")["previsao"].rename("Previsão")
@@ -114,18 +162,40 @@ def main():
         hide_index=True,
     )
 
-    st.subheader("Como foi o teste no histórico?")
-    esquerda, direita = st.columns(2)
-    esquerda.metric("Erro médio do modelo", f"{erro:.2f} unidades/dia")
-    direita.metric("Erro médio da referência", f"{erro_referencia:.2f} unidades/dia")
-    st.caption(
-        "Teste nos últimos sete dias, treinando somente nos dias anteriores. "
-        "A referência repete a última venda conhecida. Menor erro é melhor; "
-        "o modelo pode perder para essa referência. Isso não é uma porcentagem de acerto."
+    st.subheader("Comparação no histórico")
+    st.dataframe(
+        avaliacao.rename(
+            columns={
+                "modelo": "Método",
+                "mae_validacao": "MAE validação (unidades/dia)",
+                "mae_teste": "MAE teste (unidades/dia)",
+                "selecionado": "Usado na previsão",
+            }
+        ),
+        hide_index=True,
     )
+    st.caption(
+        f"Validação: {dados['data'].iloc[-14]:%d/%m/%Y} a {dados['data'].iloc[-8]:%d/%m/%Y}. "
+        f"Teste: {dados['data'].iloc[-7]:%d/%m/%Y} a {dados['data'].iloc[-1]:%d/%m/%Y}. "
+        "Cada previsão histórica usa somente dados anteriores à sua semana. "
+        "MAE é o erro absoluto médio: menor é melhor, não é porcentagem de acerto."
+    )
+    with st.expander("Como os métodos são comparados?"):
+        st.write(
+            "Última venda: repete o último valor conhecido. Semana anterior: repete "
+            "as vendas do mesmo dia da semana passada. Regressão linear: aprende "
+            "uma tendência. Regressão com dia da semana: aprende a tendência e "
+            "diferenças entre os dias da semana."
+        )
+        st.write(
+            "A penúltima semana escolhe o método, com preferência pelo mais simples "
+            "em caso de empate. A última semana mede o erro depois dessa escolha; "
+            "ela não troca o vencedor. O escolhido é reajustado com todo o histórico "
+            "para prever os próximos sete dias. Uma referência simples também pode vencer."
+        )
     st.write(
-        "O modelo é uma regressão linear: aprende apenas uma tendência ao longo do tempo. "
-        "Não considera promoções, preços, dias da semana ou falta de estoque. "
+        "Uma semana de validação e uma de teste são uma avaliação inicial. "
+        "Os métodos não consideram promoções, preços, feriados ou falta de estoque. "
         "As previsões podem ter casas decimais e não são garantia de vendas."
     )
 
