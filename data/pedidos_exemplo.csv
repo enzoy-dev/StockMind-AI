@@ -1,0 +1,4 @@
+pedido_id,sku,quantidade,data_entrega
+PED-01,CAF-001,30,2026-10-23
+PED-02,CHA-002,60,2026-10-28
+PED-03,CAF-001,100,2026-12-04

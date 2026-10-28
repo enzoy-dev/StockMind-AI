@@ -1,0 +1,6 @@
+sku,nome,fornecedor_id,estoque_atual,estoque_seguranca,pedido_minimo,multiplo_compra
+CAF-001,Café fictício,FOR-01,35,20,12,6
+CHA-002,Chá fictício,FOR-02,140,10,6,6
+CAC-003,Cacau fictício,FOR-01,300,5,10,5
+NOV-004,Produto recente,FOR-01,10,5,5,5
+SEM-005,Produto sem histórico,FOR-02,0,0,1,1
