@@ -3,17 +3,19 @@
 Uma primeira experiência com Machine Learning: ler o histórico de vendas de
 **um produto**, prever os próximos **sete dias** e visualizar o resultado.
 
-Esta versão é pequena de propósito. Usa regressão linear e uma interface
-Streamlit. Não exige chave de API, GPU ou banco de dados.
+Esta versão é pequena de propósito. Compara regressões lineares e referências
+simples em uma interface Streamlit. Não exige chave de API, GPU ou banco de dados.
 
 ## O que funciona
 
 - Abrir o exemplo fictício ou enviar um CSV próprio.
-- Treinar um modelo de regressão linear com o histórico diário.
+- Aprender tendência e diferenças de vendas entre os dias da semana.
+- Comparar a regressão original com a regressão semanal e duas referências simples.
+- Escolher o método pelo erro em uma semana de validação.
 - Exibir vendas registradas, previsão e uma tabela dos próximos sete dias.
-- Mostrar o erro em uma semana histórica separada do treinamento.
+- Mostrar o erro em uma semana de teste separada do treinamento e da seleção.
 
-Estoque, alertas, recomendações de compra, vários produtos e outros modelos
+Estoque, alertas, recomendações de compra, vários produtos e modelos mais complexos
 ficam para versões futuras. Não é um sistema pronto para empresas.
 
 ## Executar no Windows
@@ -64,38 +66,60 @@ necessariamente amanhã. Arquivos enviados não são gravados pelo aplicativo.
 Use localmente: esta versão não tem login nem configuração de hospedagem pública.
 Não adicione dados privados ao repositório.
 
-## Como o modelo funciona
+## Métodos comparados
 
-A regressão linear recebe o número do dia no histórico e aprende uma reta que
-relaciona passagem do tempo e vendas. Assim, captura uma tendência simples de
-crescimento ou queda. Previsões negativas são limitadas a zero.
+| Método | Como prevê |
+| --- | --- |
+| Última venda | Repete o último valor conhecido em todos os próximos sete dias |
+| Semana anterior | Repete a venda do mesmo dia da semana anterior |
+| Regressão linear | Aprende uma tendência de crescimento ou queda com a passagem dos dias |
+| Regressão com dia da semana | Aprende a tendência e diferenças entre segunda, terça, etc. |
 
-Para avaliar, os últimos sete dias são separados. O modelo treina apenas nos
-dias anteriores e tenta prever essa semana. O dashboard mostra o **MAE**, erro
-absoluto médio em unidades por dia. Quanto menor, melhor; não é uma porcentagem
-de acerto.
+A regressão semanal usa indicadores de categoria para os dias da semana, com
+segunda-feira como referência. Por exemplo, pode aprender que sábado costuma
+vender mais, mantendo uma tendência de crescimento. Não é usado um número
+ordinal para supor que domingo vale mais que segunda. Previsões negativas são
+limitadas a zero.
 
-Também mostramos a referência que simplesmente repete a última venda conhecida
-antes da semana de teste. O modelo pode ter erro maior que essa referência.
-Não há seleção automática de modelo nesta versão.
+## Seleção e avaliação temporal
 
-Após essa avaliação, a regressão é ajustada novamente com todo o histórico para
-produzir a previsão dos próximos sete dias. Essa previsão futura não tem vendas
-reais disponíveis para medir seu erro ainda.
+O dashboard mostra o **MAE**, erro absoluto médio em unidades por dia. Quanto
+menor, melhor; não é uma porcentagem de acerto. Os dados são divididos em ordem
+cronológica, sem embaralhar:
 
-O modelo não considera dia da semana, promoções, preços, feriados nem falta de
-estoque. Vendas registradas não revelam demanda perdida por ruptura. Os valores
-previstos podem ter casas decimais; são estimativas, não garantia de vendas.
-Um teste de uma semana e dados fictícios não demonstram eficácia em empresas.
+```text
+histórico inicial | validação: penúltimos 7 dias | teste: últimos 7 dias
+```
+
+1. Cada método recebe apenas o histórico inicial e prevê a semana de validação.
+   O menor MAE de validação escolhe o método para a previsão futura.
+2. Em empates numéricos (diferença de até `1e-9` unidade/dia), é mantido o método
+   mais simples, na ordem da tabela. Uma referência simples também pode vencer.
+3. Para medir o erro de teste, cada método recebe o histórico anterior à última
+   semana, incluindo a validação. O resultado de teste **não troca o vencedor**,
+   mesmo quando outro método apresenta um erro menor nessa semana.
+4. O método escolhido recebe todo o histórico disponível para produzir a previsão
+   dos próximos sete dias. Essa previsão futura ainda não tem valores reais para
+   medir seu erro.
+
+Com o mínimo de 30 dias, o ajuste da validação usa somente os primeiros 16 dias.
+Uma semana de validação e uma de teste permitem uma comparação inicial, mas
+podem não representar outros períodos. Mais histórico e várias janelas de
+avaliação são necessários antes de concluir qual método é mais confiável.
+
+Os métodos não consideram promoções, preços, feriados nem falta de estoque.
+Vendas registradas não revelam demanda perdida por ruptura. Os valores previstos
+podem ter casas decimais; são estimativas, não garantia de vendas. Dados fictícios
+não demonstram eficácia em empresas.
 
 ## Arquivos e testes
 
 | Arquivo | Função |
 | --- | --- |
-| `app.py` | Leitura do CSV, modelo e interface |
+| `app.py` | Leitura do CSV, métodos de previsão, comparação e interface |
 | `vendas_exemplo.csv` | Dados fictícios para experimentar |
 | `requirements.txt` | Dependências |
-| `test_app.py` | Testes de entrada, previsão e separação temporal |
+| `test_app.py` | Testes de entrada, padrões semanais, separação temporal e interface |
 
 Os testes usam `unittest`, incluído no Python. No Windows:
 
@@ -103,8 +127,11 @@ Os testes usam `unittest`, incluído no Python. No Windows:
 .\.venv\Scripts\python.exe -m unittest -v
 ```
 
+Incluem casos em que mudar as vendas da semana de teste não muda a escolha do
+método, e em que os métodos simples vencem. Também verificam o carregamento da
+tabela de comparação e o modo de envio de CSV.
+
 ## Próximo passo
 
-Entender o fluxo e experimentar com um histórico real de um único produto,
-com origem e autorização conhecidas. Depois, comparar padrões semanais antes
-de acrescentar controle de estoque.
+Experimentar com um histórico real de um único produto, com origem e autorização
+conhecidas, e comparar mais janelas temporais antes de acrescentar controle de estoque.
