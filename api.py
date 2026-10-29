@@ -10,9 +10,11 @@ from threading import Lock
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from stockmind.storage import Store, _records
 
@@ -30,6 +32,10 @@ class AnalysisRequest(RequestModel):
     pedidos: list[dict[str, Any]] | None = None
     revisao_dias: int = Field(default=7, ge=1, le=30)
     usar_planejamento_salvo: bool = False
+    comparar_horizontes: StrictBool = False
+    variacao_cenario_pct: float = Field(
+        default=20.0, strict=True, ge=0, le=80, allow_inf_nan=False
+    )
 
 
 class ActualsRequest(RequestModel):
@@ -67,7 +73,7 @@ def create_app(db_path=None):
 
     application = FastAPI(
         title="StockMind-AI",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
         description="Previsões e planejamento local. A aplicação não realiza compras.",
     )
@@ -95,6 +101,15 @@ def create_app(db_path=None):
             content={
                 "detail": {"mensagem": str(error), "relatorio": _records(report)},
             },
+        )
+
+    @application.exception_handler(RequestValidationError)
+    async def invalid_request(_request, error):
+        # JSON não finito pode chegar de clientes externos; a resposta de erro
+        # também precisa ser JSON válido, sem deixar NaN/Infinity no payload.
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _records(jsonable_encoder(error.errors()))},
         )
 
     @application.exception_handler(sqlite3.Error)
@@ -161,7 +176,10 @@ def create_app(db_path=None):
                 origem=sales["data"].max(),
             )
         if future is not None:
-            future = validar_contexto_futuro(future, sales, body.horizonte)
+            horizonte_contexto = (
+                max(body.horizonte, 30) if body.comparar_horizontes else body.horizonte
+            )
+            future = validar_contexto_futuro(future, sales, horizonte_contexto)
         result = executar_analise(
             sales,
             horizonte=body.horizonte,
@@ -170,6 +188,8 @@ def create_app(db_path=None):
             fornecedores=supplier_frame,
             pedidos=order_frame,
             revisao_dias=body.revisao_dias,
+            comparar_horizontes=body.comparar_horizontes,
+            variacao_cenario_pct=body.variacao_cenario_pct,
         )
         run_id = store().save_run(
             result,
@@ -178,7 +198,12 @@ def create_app(db_path=None):
             fornecedores=supplier_frame,
             pedidos=order_frame,
             contexto_futuro=future,
-            parametros={"horizonte": body.horizonte, "revisao_dias": body.revisao_dias},
+            parametros={
+                "horizonte": body.horizonte,
+                "revisao_dias": body.revisao_dias,
+                "comparar_horizontes": body.comparar_horizontes,
+                "variacao_cenario_pct": body.variacao_cenario_pct,
+            },
         )
         return {"id": run_id, "resultado": result}
 

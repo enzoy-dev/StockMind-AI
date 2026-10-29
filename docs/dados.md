@@ -64,6 +64,8 @@ FOR-01,Fornecedor A,5
 
 Prazo inteiro de 0 a 60 dias corridos, contado da origem. O cadastro exige IDs únicos
 e referências válidas. Estoque de segurança é informado, sem otimização estatística.
+Compras feitas ao fechar o dia chegam em `data_compra + max(1,prazo_dias)`:
+prazo zero significa a próxima manhã. Pedidos já abertos mantêm sua data explícita.
 
 ## Pedidos já abertos
 
@@ -76,8 +78,8 @@ PED-01,CAF-001,30,2026-10-23
 aceitos. Um recebimento ocorre antes das vendas previstas do dia informado.
 Compras sugeridas não criam pedidos automaticamente.
 
-Pedidos dentro da janela prazo+revisão reduzem a compra sugerida. Pedidos posteriores
-ficam separados; não são antecipados. O saldo acumula déficits como diferença entre
+Os pedidos afetam o saldo somente em suas datas, inclusive no tamanho da compra.
+Pedidos tardios não cobrem déficits anteriores. O saldo acumula déficits como diferença entre
 estoque+entradas e vendas previstas, e não como estoque físico negativo.
 
 ## Atualização das vendas realizadas
@@ -91,4 +93,4 @@ O histórico para treinar deve ser contínuo. Já a atualização de realizaçõ
 
 Esse exemplo é fictício. Ausência continua desconhecida; zero precisa ser enviado
 explicitamente. Nova linha do mesmo SKU/data corrige a realização atual, sem alterar
-snapshots de previsão. UseSKU explícito em carteiras com vários produtos.
+snapshots de previsão. Use SKU explícito em carteiras com vários produtos.

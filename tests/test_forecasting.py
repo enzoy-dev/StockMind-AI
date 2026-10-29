@@ -2,14 +2,17 @@
 
 import unittest
 import warnings
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 from stockmind.forecasting import (
+    MODELO_ATRASOS,
     MODELO_CONTEXTO,
     MODELO_INICIAL,
     analisar_previsoes,
+    comparar_horizontes,
     prever_com_modelo,
 )
 
@@ -253,6 +256,146 @@ class TestForecasting(unittest.TestCase):
         for horizonte in (0, 8, 100, True, 7.0, None):
             with self.subTest(horizonte=horizonte), self.assertRaises(ValueError):
                 analisar_previsoes(historico(), horizonte)
+
+    def test_atrasos_so_entram_se_todas_as_origens_tem_treino_suficiente(self):
+        _, curta = analisar_previsoes(historico(80))
+        _, suficiente = analisar_previsoes(historico(84))
+        self.assertNotIn(MODELO_ATRASOS, curta["modelo"].tolist())
+        self.assertIn(MODELO_ATRASOS, suficiente["modelo"].tolist())
+        with self.assertRaises(ValueError):
+            prever_com_modelo(historico(41), MODELO_ATRASOS)
+
+    def test_atrasos_usam_apenas_passado_em_cada_alvo_e_recursao_no_futuro(self):
+        dados = historico(70)
+        ajustes, atributos_previstos = [], []
+
+        class ModeloInstrumentado:
+            def fit(self, atributos, alvo):
+                ajustes.append((atributos.copy(deep=True), np.array(alvo)))
+                return self
+
+            def predict(self, atributos):
+                atributos_previstos.append(atributos.copy(deep=True))
+                return np.array([atributos["atraso_1"].iloc[0] + 2])
+
+        contexto = pd.DataFrame({"vendas": [-999999] * 30})
+        with patch(
+            "stockmind.forecasting.make_pipeline", return_value=ModeloInstrumentado()
+        ):
+            resultado = prever_com_modelo(dados, MODELO_ATRASOS, 30, contexto)
+        valores = dados["vendas"].to_numpy()
+        np.testing.assert_array_equal(resultado, valores[-1] + 2 * np.arange(1, 31))
+        treino, alvos = ajustes[0]
+        np.testing.assert_array_equal(alvos, valores[14:])
+        self.assertEqual(treino["atraso_1"].iloc[0], valores[13])
+        self.assertEqual(treino["atraso_7"].iloc[0], valores[7])
+        self.assertEqual(treino["atraso_14"].iloc[0], valores[0])
+        self.assertAlmostEqual(treino["media_7"].iloc[0], valores[7:14].mean())
+        self.assertAlmostEqual(treino["media_14"].iloc[0], valores[:14].mean())
+        self.assertEqual(atributos_previstos[1]["atraso_1"].iloc[0], resultado[0])
+        self.assertEqual(atributos_previstos[7]["atraso_7"].iloc[0], resultado[0])
+        self.assertEqual(atributos_previstos[14]["atraso_14"].iloc[0], resultado[0])
+        esperado = np.r_[valores[-6:], resultado[0]].mean()
+        self.assertAlmostEqual(atributos_previstos[1]["media_7"].iloc[0], esperado)
+        self.assertAlmostEqual(
+            atributos_previstos[14]["media_14"].iloc[0], resultado[:14].mean()
+        )
+
+    def test_atrasos_aprendem_autocorrelacao_em_serie_sintetica(self):
+        dados = historico(280)
+        dias = np.arange(len(dados))
+        dados["vendas"] = np.round(
+            100 + 20 * np.sin(2 * np.pi * dias / 30) + 5 * np.sin(2 * np.pi * dias / 7)
+        )
+        _, metricas = analisar_previsoes(dados)
+        erros = metricas.set_index("modelo")
+        self.assertLess(
+            erros.loc[MODELO_ATRASOS, "mae_teste"],
+            erros.loc["Semana anterior", "mae_teste"],
+        )
+
+    def test_atrasos_nao_usam_alvos_do_bloco_de_teste(self):
+        dados = historico()
+        _, original = analisar_previsoes(dados)
+        dados.loc[len(dados) - 7 :, "vendas"] += 1000
+        _, alterada = analisar_previsoes(dados)
+        a = original.set_index("modelo").loc[MODELO_ATRASOS]
+        b = alterada.set_index("modelo").loc[MODELO_ATRASOS]
+        self.assertEqual(a["mae_validacao"], b["mae_validacao"])
+        self.assertGreater(b["mae_teste"] - a["mae_teste"], 990)
+
+    def test_comparacao_tem_uma_linha_por_produto_e_horizonte(self):
+        dados = pd.concat([historico(150, "A"), historico(150, "B")], ignore_index=True)
+        resumo = comparar_horizontes(dados)
+        self.assertEqual(len(resumo), 6)
+        self.assertFalse(resumo.duplicated(["sku", "horizonte"]).any())
+        self.assertTrue(resumo["selecionado"].all())
+        self.assertEqual(set(resumo["horizonte"]), {7, 14, 30})
+        duracao = (resumo["teste_fim"] - resumo["teste_inicio"]).dt.days + 1
+        self.assertTrue(duracao.eq(resumo["horizonte"]).all())
+        self.assertTrue(
+            resumo["comparacao_observacao"]
+            .str.contains("durações de teste distintas")
+            .all()
+        )
+
+    def test_comparacao_nao_troca_escolha_por_resultado_do_teste(self):
+        dados = historico()
+        dados.loc[len(dados) - 7 :, "vendas"] = dados["vendas"].iloc[-8]
+        resumo = comparar_horizontes(dados, horizontes=(7,))
+        linha = resumo.iloc[0]
+        self.assertEqual(linha["modelo"], "Regressão linear")
+        self.assertAlmostEqual(linha["mae_validacao"], 0)
+        self.assertGreater(linha["mae_teste"], linha["mae_teste_semana_anterior"])
+        self.assertAlmostEqual(linha["ganho_mae_teste_pct"], -100 / 3)
+
+    def test_ganho_e_indefinido_quando_referencia_tem_erro_zero_ou_ausente(self):
+        dados = historico()
+        dados["vendas"] = 0
+        resumo = comparar_horizontes(dados)
+        self.assertTrue(resumo["ganho_mae_teste_pct"].isna().all())
+        self.assertTrue(resumo["mae_teste_semana_anterior"].eq(0).all())
+        self.assertTrue(resumo["wape_teste"].isna().all())
+        curto = comparar_horizontes(historico(5))
+        self.assertEqual(len(curto), 3)
+        self.assertTrue(curto["status"].eq("historico_curto").all())
+        self.assertTrue(
+            curto[
+                [
+                    "mae_teste",
+                    "mae_teste_semana_anterior",
+                    "ganho_mae_teste_pct",
+                    "wape_teste",
+                ]
+            ]
+            .isna()
+            .all()
+            .all()
+        )
+
+    def test_calendario_futuro_pode_ser_reutilizado_em_varios_horizontes(self):
+        dados, curto = self.contextual()
+        plano = pd.DataFrame(
+            {
+                "sku": "A",
+                "data": pd.date_range(curto["data"].iloc[0], periods=30),
+                "preco": 12,
+                "promocao": 0,
+                "feriado": 0,
+            }
+        )
+        resumo = comparar_horizontes(dados, plano)
+        self.assertTrue(resumo["modelo"].eq(MODELO_CONTEXTO).all())
+        self.assertTrue(resumo["contexto_utilizado"].all())
+        previsto_curto, metrica_curta = analisar_previsoes(dados, contexto_futuro=curto)
+        previsto_longo, metrica_longa = analisar_previsoes(dados, contexto_futuro=plano)
+        pd.testing.assert_frame_equal(previsto_curto, previsto_longo)
+        pd.testing.assert_frame_equal(metrica_curta, metrica_longa)
+
+    def test_comparacao_rejeita_horizontes_duplicados_ou_vazios(self):
+        for horizontes in ((), (7, 7), (8,)):
+            with self.subTest(horizontes=horizontes), self.assertRaises(ValueError):
+                comparar_horizontes(historico(), horizontes=horizontes)
 
     @staticmethod
     def contextual():

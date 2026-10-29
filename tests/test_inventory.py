@@ -135,7 +135,9 @@ class TestPlanejamentoEstoque(unittest.TestCase):
         _, compras = self.executar()
         compra = compras.iloc[0]
         self.assertFalse(compra["risco_antes_reposicao"])
-        self.assertEqual(compra["data_reposicao_estimada"], self.origem)
+        self.assertEqual(
+            compra["data_reposicao_estimada"], self.origem + pd.Timedelta(days=1)
+        )
         self.assertEqual(compra["horizonte_necessario"], 7)
 
     def test_recebimento_ocorre_antes_da_venda_do_dia(self):
@@ -213,6 +215,186 @@ class TestPlanejamentoEstoque(unittest.TestCase):
         self.produtos.loc[0, ["estoque_atual", "estoque_seguranca"]] = [90, 0]
         _, compras = self.executar()
         self.assertEqual(compras.iloc[0]["compra_sugerida"], 0)
+
+    def test_programa_compra_futura_e_recalcula_quantidade(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [100, 0, 1]
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["compra_sugerida"], 0)
+        self.assertEqual(
+            compra["primeira_abaixo_seguranca"], self.origem + pd.Timedelta(days=11)
+        )
+        self.assertEqual(compra["dias_ate_seguranca"], 11)
+        self.assertEqual(compra["dias_ate_falta"], 11)
+        self.assertEqual(
+            compra["data_limite_compra"], self.origem + pd.Timedelta(days=9)
+        )
+        self.assertEqual(
+            compra["data_compra_sugerida"], self.origem + pd.Timedelta(days=9)
+        )
+        self.assertEqual(
+            compra["data_entrega_compra_sugerida"], self.origem + pd.Timedelta(days=11)
+        )
+        # Estoque no fechamento do dia 9 = 10; demanda dos dias 10..18 = 90.
+        self.assertEqual(compra["quantidade_compra_na_data"], 80)
+        self.assertEqual(compra["horizonte_necessario_agendamento"], 18)
+        self.assertEqual(compra["status_agendamento"], "compra_programada")
+        self.assertFalse(compra["prazo_compra_vencido"])
+
+    def test_compra_futura_nao_desconta_recebimento_passado_duas_vezes(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [100, 0, 1]
+        self.pedido(20, 5)
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(
+            compra["data_compra_sugerida"], self.origem + pd.Timedelta(days=11)
+        )
+        # Já recebido antes da compra: estoque projetado no dia 11 é 10.
+        self.assertEqual(compra["quantidade_compra_na_data"], 80)
+
+    def test_compra_futura_cobre_ponte_antes_de_pedido_tardio(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [100, 0, 1]
+        self.pedido(200, 12)
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["compra_sugerida"], 0)
+        self.assertEqual(
+            compra["data_compra_sugerida"], self.origem + pd.Timedelta(days=9)
+        )
+        # O pedido grande do dia 12 não cobre o déficit de 10 no dia 11.
+        self.assertEqual(compra["quantidade_compra_na_data"], 10)
+
+    def test_compra_agora_tambem_cobre_ponte_com_datas_exatas(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [0, 0, 1]
+        self.pedido(100, 5)
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["estoque_alvo"], 90)
+        self.assertEqual(compra["posicao_estoque"], 100)
+        # O agregado sugere zero; o caminho até o pedido do dia 5 exige 40.
+        self.assertEqual(compra["compra_sugerida"], 40)
+        self.assertEqual(compra["quantidade_compra_na_data"], 40)
+        self.assertEqual(compra["prioridade"], "critica")
+        self.assertEqual(compra["prioridade_ordem"], 1)
+
+    def test_pedido_grande_tardio_com_compra_zero_ainda_exige_urgencia(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [0, 0, 1]
+        self.fornecedores.loc[0, "prazo_dias"] = 4
+        self.pedido(200, 3)
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["compra_sugerida"], 0)
+        self.assertEqual(compra["quantidade_compra_na_data"], 0)
+        self.assertEqual(compra["status"], "revisar_entrega_urgente")
+        self.assertEqual(compra["prioridade"], "critica")
+        self.assertTrue(compra["falta_antes_entrega_compra"])
+        self.assertEqual(compra["status_agendamento"], "sem_compra_adicional")
+        self.assertTrue(pd.isna(compra["data_compra_sugerida"]))
+        self.assertIn("antecipação", compra["motivos_alerta"])
+
+    def test_prazo_vencido_de_seguranca_nao_implica_falta_impossivel(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [25, 20, 1]
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        # Segurança cruza no dia 1; falta só no dia 3; entrega possível no dia 2.
+        self.assertEqual(
+            compra["data_limite_compra"], self.origem - pd.Timedelta(days=1)
+        )
+        self.assertEqual(compra["data_compra_sugerida"], self.origem)
+        self.assertTrue(compra["prazo_compra_vencido"])
+        self.assertFalse(compra["falta_antes_entrega_compra"])
+        self.assertEqual(compra["prioridade"], "alta")
+        self.assertEqual(compra["status_agendamento"], "prazo_vencido")
+
+    def test_horizonte_curto_informa_prazo_mas_nao_inventa_quantidade_futura(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [100, 0, 1]
+        self.previsoes = self.previsoes.iloc[:14]
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["compra_sugerida"], 0)
+        self.assertEqual(
+            compra["data_compra_sugerida"], self.origem + pd.Timedelta(days=9)
+        )
+        self.assertEqual(compra["horizonte_necessario_agendamento"], 18)
+        self.assertTrue(pd.isna(compra["quantidade_compra_na_data"]))
+        self.assertEqual(compra["status_agendamento"], "horizonte_insuficiente")
+
+    def test_sem_cruzamento_no_horizonte_nao_promete_estoque_para_sempre(self):
+        self.produtos.loc[0, "estoque_atual"] = 1000
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        for coluna in (
+            "data_limite_compra",
+            "data_compra_sugerida",
+            "quantidade_compra_na_data",
+            "dias_ate_seguranca",
+            "dias_ate_falta",
+        ):
+            self.assertTrue(pd.isna(compra[coluna]), coluna)
+        self.assertEqual(compra["status_agendamento"], "sem_gatilho_no_horizonte")
+        self.assertIn("desconhecida", compra["motivos_alerta"])
+
+    def test_estoque_exatamente_na_seguranca_nao_e_abaixo(self):
+        self.produtos.loc[0, ["estoque_atual", "estoque_seguranca"]] = [10, 10]
+        self.previsoes["previsao"] = 0
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertTrue(pd.isna(compra["primeira_abaixo_seguranca"]))
+        self.assertEqual(compra["status_agendamento"], "sem_gatilho_no_horizonte")
+        self.assertEqual(compra["compra_sugerida"], 0)
+
+    def test_segurança_ja_violada_no_fechamento_tem_dia_zero(self):
+        self.produtos.loc[0, ["estoque_atual", "estoque_seguranca"]] = [4, 5]
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["primeira_abaixo_seguranca"], self.origem)
+        self.assertEqual(compra["dias_ate_seguranca"], 0)
+        self.assertEqual(
+            compra["data_limite_compra"], self.origem - pd.Timedelta(days=2)
+        )
+
+    def test_prazo_zero_compra_no_fechamento_anterior_a_venda(self):
+        self.produtos.loc[
+            0, ["estoque_atual", "estoque_seguranca", "multiplo_compra"]
+        ] = [10, 0, 1]
+        self.fornecedores.loc[0, "prazo_dias"] = 0
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(
+            compra["primeira_abaixo_seguranca"], self.origem + pd.Timedelta(days=2)
+        )
+        self.assertEqual(
+            compra["data_compra_sugerida"], self.origem + pd.Timedelta(days=1)
+        )
+        self.assertEqual(
+            compra["data_entrega_compra_sugerida"], self.origem + pd.Timedelta(days=2)
+        )
+        # Compra fecha no dia 1; janela de proteção termina no dia 8.
+        self.assertEqual(compra["quantidade_compra_na_data"], 70)
+        self.assertFalse(compra["risco_antes_reposicao"])
+
+    def test_produto_sem_previsao_tem_alerta_indefinido(self):
+        self.previsoes = self.previsoes.iloc[:0]
+        _, compras = self.executar()
+        compra = compras.iloc[0]
+        self.assertEqual(compra["status_agendamento"], "sem_previsao")
+        self.assertEqual(compra["prioridade"], "indefinida")
+        self.assertEqual(compra["prioridade_ordem"], 5)
+        self.assertTrue(pd.isna(compra["quantidade_compra_na_data"]))
 
 
 if __name__ == "__main__":

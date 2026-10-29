@@ -15,7 +15,12 @@ def main():
         "--output", type=Path, default=ROOT / "data/requisicao_exemplo.json"
     )
     args = parser.parse_args()
-    result = {"horizonte": 30, "revisao_dias": 7}
+    result = {
+        "horizonte": 30,
+        "revisao_dias": 7,
+        "comparar_horizontes": True,
+        "variacao_cenario_pct": 20.0,
+    }
     for key, filename in {
         "vendas": "vendas_multiplos_exemplo.csv",
         "contexto_futuro": "contexto_futuro_exemplo.csv",

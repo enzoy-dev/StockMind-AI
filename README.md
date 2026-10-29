@@ -11,14 +11,17 @@ nesses exemplos não comprovam redução de faltas ou desempenho em uma empresa 
 
 - CSV com vários produtos; formato original `data,vendas` continua aceito.
 - Previsões de 7, 14, 30 ou 90 dias, avaliadas no horizonte escolhido.
+- Comparação de 7, 14 e 30 dias por produto, com erro frente à referência semanal.
 - Até três janelas temporais para seleção e um teste final separado.
-- Referências simples, regressões, Croston-SBA para vendas esporádicas e modelo
+- Referências simples, regressões com calendário/atrasos, Croston-SBA e modelo
   contextual quando preços/promoções/feriados futuros são conhecidos.
 - Faixas empíricas de 90%, calibradas em período independente quando há dados.
 - Estimativas iniciais explícitas para históricos curtos; produtos sem vendas
   no catálogo ficam sem previsão, em vez de receber zero artificial.
 - Cadastro de produtos, fornecedores, estoque de segurança, lotes e pedidos abertos.
-- Saldo diário, possível falta/excesso e sugestões de compra para revisão humana.
+- Saldo diário, dias até falta/segurança, prioridade e motivos dos alertas.
+- Data-limite e data sugerida de compra, com quantidade recalculada na janela futura.
+- Cenários de demanda menor/base/maior com variação percentual configurável.
 - Dashboard com filtros, gráficos interativos e exportação de CSVs.
 - SQLite com snapshots de entradas/previsões e comparação com vendas posteriores.
 - API para análise, cadastros e atualização de vendas realizadas.
@@ -54,7 +57,9 @@ GPU ou serviço externo.
 2. **Exemplo de um produto** mantém o CSV original de 60 dias.
 3. **Enviar CSV** aceita seus dados. Cadastros de estoque podem ser editados na
    tela, importados ou carregados do SQLite.
-4. Escolha o horizonte e confira previsões, métricas, prioridades e qualidade.
+4. Escolha o horizonte, a comparação 7/14/30 e a variação percentual dos cenários.
+   O dashboard abre em **Decisões de reposição**: revise urgências, compras futuras
+   e excesso. As abas Previsões e Cenários de demanda detalham os cálculos.
 5. **Salvar análise e entradas no histórico** registra um snapshot. Salvar não
    equivale a aprovar compras. Depois, registre novas vendas para comparar.
 
@@ -82,14 +87,23 @@ Preço, promoção e feriado são opcionais. O modelo contextual só é comparad
 há histórico **e plano futuro completos** desses campos; eles devem ter sido
 conhecidos antes das previsões, inclusive na avaliação histórica.
 
-A compra sugerida considera demanda prevista no prazo do fornecedor + revisão,
-segurança informada e pedidos que chegam dentro dessa janela. Aplica mínimo e
-múltiplo somente se existir necessidade. Datas exatas dos pedidos entram no saldo;
-um pedido tardio pode reduzir a compra agregada e ainda deixar uma falta antes
-que ele chegue. O dashboard mantém o alerta de déficit nesse caso.
+A compra sugerida usa o caminho diário com as datas exatas dos pedidos e o maior
+déficit em relação à segurança após a entrega possível, dentro da janela de proteção.
+Aplica mínimo e múltiplo somente se existir necessidade. Assim, um pedido grande
+e tardio não esconde uma falta anterior. Uma compra não resolve déficits que
+ocorreriam antes de sua entrega; esses casos recebem prioridade de revisão.
+
+A data-limite é a primeira passagem abaixo da segurança menos o prazo efetivo do
+fornecedor. A data acionável nunca é anterior à referência; a quantidade é
+recalculada considerando a depleção e os recebimentos na janela futura. Prazo zero
+significa a manhã seguinte à compra feita no fechamento do dia.
+
+[Regras de agendamento, prioridades e cenários](docs/reposicao.md).
 
 Se a previsão não cobrir prazo + revisão, a sugestão fica indefinida com o horizonte
-necessário. Excesso é uma triagem de 30 dias, indisponível em horizontes menores.
+necessário. Uma compra futura pode exigir horizonte maior do que comprar na referência.
+Sem cruzamento da segurança, a próxima data de compra fica desconhecida além do
+período previsto. Excesso é uma triagem de 30 dias, indisponível em horizontes menores.
 Compras de produtos com histórico curto são provisórias. Segurança não é estimada
 automaticamente; vencimento, orçamento e custo de falta não são otimizados.
 
@@ -107,6 +121,13 @@ automaticamente; vencimento, orçamento e custo de falta não são otimizados.
 Os números acima usam treino inicial mínimo de 14 dias. A quantidade de janelas
 cresce até três conforme o histórico disponível. Séries curtas usam a média dos
 últimos até 14 dias, sem métricas ou faixas artificiais.
+O candidato com atrasos só participa quando o primeiro treino de validação tem
+pelo menos 42 dias. Ele usa valores previstos na recursão, sem consultar vendas futuras.
+
+A comparação 7/14/30 tem seleção independente por horizonte. Os testes cobrem
+períodos distintos e seus erros não medem uma precisão em datas idênticas. Redução
+de MAE positiva indica ganho sobre repetir a semana anterior; negativa indica perda.
+O teste nunca troca o método escolhido na validação.
 
 MAE/viés em unidades por dia; WAPE/cobertura em porcentagem. Viés positivo indica
 superestimação. WAPE fica vazio quando as vendas reais somam zero. O teste final
@@ -115,6 +136,8 @@ não escolhe o método nem a largura da faixa.
 Faixas são empíricas por ponto, não garantia de 90% de cobertura futura ou conjunta
 de toda a trajetória. Vendas observadas não revelam demanda perdida em rupturas.
 Promoções e preços podem estar associados a vendas sem demonstrar efeito causal.
+Os cenários percentuais de demanda são sensibilidade determinística, sem probabilidade
+atribuída; não são trajetórias extraídas dos limites estatísticos do modelo.
 
 ## Banco local e histórico
 
@@ -162,6 +185,7 @@ api.py                  FastAPI e autenticação opcional por chave
 stockmind/data.py       importação e relatório de qualidade
 stockmind/forecasting.py modelos, janelas temporais e faixas
 stockmind/inventory.py   saldo e reposição
+stockmind/scenarios.py   sensibilidade das decisões à demanda
 stockmind/service.py     fluxo compartilhado, sem persistência implícita
 stockmind/storage.py     SQLite e acompanhamento de realizações
 ```

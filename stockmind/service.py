@@ -1,6 +1,8 @@
 """Fluxo compartilhado pelo dashboard e pela API, sem gravar dados implicitamente."""
 
 import json
+import math
+from numbers import Real
 
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
@@ -11,8 +13,12 @@ from stockmind.data import (
     validar_planejamento,
     validar_vendas,
 )
-from stockmind.forecasting import analisar_previsoes
+from stockmind.forecasting import (
+    analisar_previsoes,
+    comparar_horizontes as avaliar_horizontes,
+)
 from stockmind.inventory import planejar_estoque
+from stockmind.scenarios import simular_cenarios
 
 
 def registros(frame):
@@ -34,6 +40,8 @@ def executar_analise(
     fornecedores=None,
     pedidos=None,
     revisao_dias=7,
+    comparar_horizontes=False,
+    variacao_cenario_pct=20.0,
 ):
     """Valida, prevê, compara métodos e calcula o estoque; não realiza compras."""
     if isinstance(horizonte, bool) or horizonte not in (7, 14, 30, 90):
@@ -44,12 +52,24 @@ def executar_analise(
         or not 1 <= revisao_dias <= 30
     ):
         raise ValueError("Revisão do estoque deve ser entre 1 e 30 dias.")
+    if not isinstance(comparar_horizontes, bool):
+        raise ValueError("comparar_horizontes deve ser booleano.")
+    if (
+        isinstance(variacao_cenario_pct, bool)
+        or not isinstance(variacao_cenario_pct, Real)
+        or not math.isfinite(variacao_cenario_pct)
+        or not 0 <= variacao_cenario_pct <= 80
+    ):
+        raise ValueError(
+            "Variação dos cenários deve ser um número entre 0 e 80 por cento."
+        )
     qualidade = inspecionar_vendas(vendas)
     vendas = validar_vendas(vendas)
     origem = vendas["data"].max()
     contexto = None
     if contexto_futuro is not None:
-        contexto = validar_contexto_futuro(contexto_futuro, vendas, horizonte)
+        cobertura_contexto = max(horizonte, 30) if comparar_horizontes else horizonte
+        contexto = validar_contexto_futuro(contexto_futuro, vendas, cobertura_contexto)
     elif any(campo in vendas for campo in ("preco", "promocao", "feriado")):
         qualidade = pd.concat(
             [
@@ -102,18 +122,35 @@ def executar_analise(
             )
 
     previsoes, metricas = analisar_previsoes(vendas, horizonte, contexto)
+    comparacao = (
+        avaliar_horizontes(vendas, contexto) if comparar_horizontes else pd.DataFrame()
+    )
     saldos, recomendacoes = pd.DataFrame(), pd.DataFrame()
+    cenarios, saldos_cenarios = pd.DataFrame(), pd.DataFrame()
     if usar_estoque:
         saldos, recomendacoes = planejar_estoque(
             previsoes, produtos, fornecedores, pedidos, revisao_dias
+        )
+        cenarios, saldos_cenarios = simular_cenarios(
+            previsoes,
+            produtos,
+            fornecedores,
+            pedidos,
+            revisao_dias,
+            variacao_cenario_pct,
         )
     return {
         "origem": origem.date().isoformat(),
         "horizonte": horizonte,
         "revisao_dias": revisao_dias,
+        "comparar_horizontes": comparar_horizontes,
+        "variacao_cenario_pct": float(variacao_cenario_pct),
         "previsoes": registros(previsoes),
         "metricas": registros(metricas),
         "saldos": registros(saldos),
         "recomendacoes": registros(recomendacoes),
         "qualidade": registros(qualidade),
+        "comparacao_horizontes": registros(comparacao),
+        "cenarios": registros(cenarios),
+        "saldos_cenarios": registros(saldos_cenarios),
     }
