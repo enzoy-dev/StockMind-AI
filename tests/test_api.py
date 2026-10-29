@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -32,6 +33,11 @@ def fixture_analysis(sales, **_kwargs):
         "saldos": [],
         "recomendacoes": [],
         "qualidade": [],
+        "comparacao_horizontes": [],
+        "cenarios": [],
+        "saldos_cenarios": [],
+        "comparar_horizontes": _kwargs.get("comparar_horizontes", False),
+        "variacao_cenario_pct": _kwargs.get("variacao_cenario_pct", 20.0),
     }
 
 
@@ -90,6 +96,161 @@ class TestAPI(unittest.TestCase):
                     "/analises", json={"vendas": self.sales, **extra}
                 )
                 self.assertEqual(response.status_code, 422)
+
+    @patch("api.executar_analise", side_effect=fixture_analysis)
+    def test_new_parameters_keep_existing_request_defaults(self, analyse):
+        response = self.client.post("/analises", json={"vendas": self.sales})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertIs(analyse.call_args.kwargs["comparar_horizontes"], False)
+        self.assertEqual(analyse.call_args.kwargs["variacao_cenario_pct"], 20.0)
+        snapshot = self.client.get(f"/analises/{response.json()['id']}").json()
+        self.assertEqual(
+            snapshot["entrada"]["parametros"],
+            {
+                "horizonte": 7,
+                "revisao_dias": 7,
+                "comparar_horizontes": False,
+                "variacao_cenario_pct": 20.0,
+            },
+        )
+        self.assertEqual(len(snapshot["resultado"]["previsoes"]), 7)
+
+    def test_scenario_results_and_parameters_are_in_the_immutable_snapshot(self):
+        def analysis_with_scenarios(sales, **kwargs):
+            result = fixture_analysis(sales, **kwargs)
+            result["comparacao_horizontes"] = [{"sku": "001", "horizonte": 30}]
+            result["cenarios"] = [
+                {"sku": "001", "cenario": "demanda_alta", "compra_sugerida": 12}
+            ]
+            result["saldos_cenarios"] = [
+                {
+                    "sku": "001",
+                    "cenario": "demanda_alta",
+                    "data": "2026-01-03",
+                    "saldo_estimado": 3,
+                }
+            ]
+            return result
+
+        with patch(
+            "api.executar_analise", side_effect=analysis_with_scenarios
+        ) as analyse:
+            response = self.client.post(
+                "/analises",
+                json={
+                    "vendas": self.sales,
+                    "comparar_horizontes": True,
+                    "variacao_cenario_pct": 35,
+                },
+            )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertIs(analyse.call_args.kwargs["comparar_horizontes"], True)
+        self.assertEqual(analyse.call_args.kwargs["variacao_cenario_pct"], 35.0)
+        run_id = response.json()["id"]
+        snapshot = self.client.get(f"/analises/{run_id}").json()
+        self.assertEqual(snapshot["resultado"], response.json()["resultado"])
+        self.assertEqual(
+            snapshot["entrada"]["parametros"]["variacao_cenario_pct"], 35.0
+        )
+        self.assertTrue(snapshot["entrada"]["parametros"]["comparar_horizontes"])
+        self.client.post(
+            "/vendas",
+            json={"vendas": [{"sku": "001", "data": "2026-01-03", "vendas": 4}]},
+        )
+        self.assertEqual(self.client.get(f"/analises/{run_id}").json(), snapshot)
+
+    @patch("api.executar_analise", side_effect=fixture_analysis)
+    def test_future_context_covers_comparison_horizons_without_truncating_to_primary(
+        self, analyse
+    ):
+        context = [
+            {
+                "sku": "001",
+                "data": (date(2026, 1, 3) + timedelta(days=i)).isoformat(),
+                "preco": 10.0,
+                "promocao": 0,
+                "feriado": 0,
+            }
+            for i in range(90)
+        ]
+        for horizon, compare, expected in [
+            (7, False, 7),
+            (7, True, 30),
+            (90, True, 90),
+        ]:
+            with self.subTest(horizon=horizon, compare=compare):
+                response = self.client.post(
+                    "/analises",
+                    json={
+                        "vendas": self.sales,
+                        "horizonte": horizon,
+                        "comparar_horizontes": compare,
+                        "contexto_futuro": context,
+                    },
+                )
+                self.assertEqual(response.status_code, 201, response.text)
+                forwarded = analyse.call_args.kwargs["contexto_futuro"]
+                self.assertEqual(len(forwarded), expected)
+                snapshot = self.client.get(f"/analises/{response.json()['id']}").json()
+                self.assertEqual(len(snapshot["entrada"]["contexto_futuro"]), expected)
+        before = len(self.client.get("/analises").json())
+        response = self.client.post(
+            "/analises",
+            json={
+                "vendas": self.sales,
+                "comparar_horizontes": True,
+                "contexto_futuro": context[:7],
+            },
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("30", response.json()["detail"]["mensagem"])
+        self.assertEqual(len(self.client.get("/analises").json()), before)
+
+    @patch("api.executar_analise", side_effect=fixture_analysis)
+    def test_invalid_scenario_parameters_rejected_before_any_analysis_or_write(
+        self, analyse
+    ):
+        invalid = [
+            {"variacao_cenario_pct": value}
+            for value in (
+                -1,
+                80.1,
+                True,
+                False,
+                "20",
+                None,
+                {},
+                float("nan"),
+                float("inf"),
+                -float("inf"),
+            )
+        ] + [{"comparar_horizontes": value} for value in (1, 0, "true", None)]
+        for extra in invalid:
+            with self.subTest(extra=extra):
+                response = self.client.post(
+                    "/analises",
+                    content=json.dumps({"vendas": self.sales, **extra}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+        analyse.assert_not_called()
+        self.assertEqual(self.client.get("/analises").json(), [])
+
+    @patch("api.executar_analise", side_effect=fixture_analysis)
+    def test_scenario_percentage_accepts_both_inclusive_limits(self, analyse):
+        for percentage in (0, 80):
+            with self.subTest(percentage=percentage):
+                response = self.client.post(
+                    "/analises",
+                    json={
+                        "vendas": self.sales,
+                        "variacao_cenario_pct": percentage,
+                    },
+                )
+                self.assertEqual(response.status_code, 201, response.text)
+                self.assertEqual(
+                    analyse.call_args.kwargs["variacao_cenario_pct"], float(percentage)
+                )
 
     def test_missing_history_returns_404(self):
         self.assertEqual(self.client.get("/analises/inexistente").status_code, 404)

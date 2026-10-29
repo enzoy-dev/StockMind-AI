@@ -52,6 +52,8 @@ O corpo aceita:
   "fornecedores": null,
   "pedidos": null,
   "revisao_dias": 7,
+  "comparar_horizontes": false,
+  "variacao_cenario_pct": 20.0,
   "usar_planejamento_salvo": false
 }
 ```
@@ -63,6 +65,21 @@ sem estoque; pedidos podem ser omitidos ou `[]`.
 
 O retorno inclui `id` e `resultado`, com `previsoes,metricas,saldos,recomendacoes,qualidade`,
 origem e horizonte. Valores desconhecidos aparecem como `null`, não como 0.
+
+`comparar_horizontes:true` habilita o resumo por SKU para 7/14/30 dias, mantendo o
+horizonte principal para a previsão e o planejamento. Nesse caso, o contexto futuro,
+se enviado, precisa cobrir `max(horizonte,30)` dias. O padrão `false` preserva o
+comportamento das requisições anteriores.
+
+`variacao_cenario_pct` é um número finito de 0 a 80, padrão 20. Com planejamento,
+gera demanda menor/base/maior por sensibilidade percentual. Strings e booleanos
+não são aceitos como percentual; `comparar_horizontes` exige booleano JSON.
+
+Os novos resultados são `comparacao_horizontes`, `cenarios` e `saldos_cenarios`.
+Sem comparação, o primeiro é vazio; sem planejamento, os dois últimos são vazios.
+Tudo fica preservado no snapshot com seus parâmetros. Não há migração SQLite.
+As recomendações incluem data-limite, data acionável, quantidade na data e prioridade;
+veja as [regras de reposição](reposicao.md) antes de interpretar valores vazios.
 
 ## Acompanhar uma previsão
 

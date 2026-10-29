@@ -40,6 +40,20 @@ COLUNAS_RECOMENDACOES = [
     "unidades_acima_alvo_30dias",
     "horizonte_necessario",
     "dias_previstos",
+    "primeira_abaixo_seguranca",
+    "dias_ate_falta",
+    "dias_ate_seguranca",
+    "data_limite_compra",
+    "data_compra_sugerida",
+    "data_entrega_compra_sugerida",
+    "quantidade_compra_na_data",
+    "horizonte_necessario_agendamento",
+    "prazo_compra_vencido",
+    "falta_antes_entrega_compra",
+    "status_agendamento",
+    "prioridade",
+    "prioridade_ordem",
+    "motivos_alerta",
     "status",
     "status_previsao",
 ]
@@ -75,15 +89,157 @@ def _datas(dados, coluna, nome):
         raise ValueError(f"{nome}: informe datas sem horário.")
 
 
+def _quantidade_na_data(caminho, data_compra, prazo, revisao, seguranca, minimo, lote):
+    """Tamanho de uma compra considerando o caminho exato sem essa compra.
+
+    O caminho já inclui o estoque inicial, TODA depleção até cada data e pedidos
+    abertos na data correta. Portanto, não se descontam os pedidos novamente.
+    Usa-se o maior déficit de segurança entre a chegada e o fim da proteção;
+    considerar só o saldo final poderia esconder faltas antes de um pedido tardio.
+    """
+    chegada = data_compra + pd.Timedelta(days=max(1, prazo))
+    fim = data_compra + pd.Timedelta(days=prazo + revisao)
+    if caminho.empty or fim > caminho.index[-1]:
+        return None
+    protegido = caminho.loc[(caminho.index >= chegada) & (caminho.index <= fim)]
+    if protegido.empty:
+        return None
+    necessidade = max(0.0, seguranca - float(protegido.min()))
+    if necessidade <= 1e-9:
+        return 0
+    return math.ceil((max(necessidade, minimo) - 1e-9) / lote) * lote
+
+
+def _agendar_compra(
+    recomendacao, caminho, origem, prazo, revisao, seguranca, minimo, lote
+):
+    """Define um prazo teórico e uma ação possível, sem simular aprovação."""
+    primeira_seguranca = recomendacao["primeira_abaixo_seguranca"]
+    primeira_falta = recomendacao["primeira_falta"]
+    motivos = []
+    if primeira_falta is not None:
+        recomendacao["dias_ate_falta"] = (primeira_falta - origem).days
+        motivos.append(f"Falta projetada em {primeira_falta:%Y-%m-%d}")
+
+    if primeira_seguranca is None:
+        recomendacao["status_agendamento"] = "sem_gatilho_no_horizonte"
+        motivos.append(
+            f"Sem saldo abaixo da segurança nos {len(caminho)} dias previstos; "
+            "a necessidade após esse horizonte é desconhecida"
+        )
+    else:
+        recomendacao["dias_ate_seguranca"] = (primeira_seguranca - origem).days
+        motivos.append(f"Saldo abaixo da segurança em {primeira_seguranca:%Y-%m-%d}")
+        prazo_efetivo = max(1, prazo)
+        limite = primeira_seguranca - pd.Timedelta(days=prazo_efetivo)
+        data_compra = max(origem, limite)
+        chegada = data_compra + pd.Timedelta(days=prazo_efetivo)
+        horizonte_necessario = (data_compra - origem).days + prazo + revisao
+        quantidade = _quantidade_na_data(
+            caminho, data_compra, prazo, revisao, seguranca, minimo, lote
+        )
+        vencido = limite < origem
+        falta_antes = bool(primeira_falta is not None and primeira_falta < chegada)
+        recomendacao.update(
+            {
+                "data_limite_compra": limite,
+                "data_compra_sugerida": data_compra,
+                "data_entrega_compra_sugerida": chegada,
+                "quantidade_compra_na_data": quantidade,
+                "horizonte_necessario_agendamento": horizonte_necessario,
+                "prazo_compra_vencido": vencido,
+                "falta_antes_entrega_compra": falta_antes,
+            }
+        )
+        if vencido:
+            motivos.append("Prazo teórico para manter a segurança já vencido")
+        if falta_antes:
+            motivos.append(
+                "Comprar na data possível não evita a falta anterior à entrega; "
+                "revisar antecipação de recebimentos ou outra fonte de estoque"
+            )
+        if quantidade is None:
+            recomendacao["status_agendamento"] = "horizonte_insuficiente"
+            motivos.append(
+                f"Previsão precisa cobrir {horizonte_necessario} dias para "
+                "dimensionar a compra na data sugerida"
+            )
+        elif quantidade == 0:
+            # Pedidos já abertos podem recuperar o saldo antes que uma compra
+            # adicional pudesse chegar. Não inventar uma compra de zero unidades.
+            recomendacao.update(
+                {
+                    "status_agendamento": "sem_compra_adicional",
+                    "data_compra_sugerida": None,
+                    "data_entrega_compra_sugerida": None,
+                }
+            )
+            motivos.append(
+                "Pedidos existentes cobrem a segurança após a primeira entrega "
+                "possível; revisar o déficit anterior separadamente"
+            )
+        elif vencido:
+            recomendacao["status_agendamento"] = "prazo_vencido"
+        elif data_compra == origem:
+            recomendacao["status_agendamento"] = "comprar_agora"
+        else:
+            recomendacao["status_agendamento"] = "compra_programada"
+            motivos.append(f"Compra programada para {data_compra:%Y-%m-%d}")
+
+    if recomendacao["em_transito_apos_janela"]:
+        motivos.append("Há pedidos que chegam depois da janela de proteção atual")
+    if recomendacao["excesso"]:
+        motivos.append("Posição acima do alvo de vendas e segurança de 30 dias")
+
+    # Um déficit anterior à entrega possível exige ação mesmo quando a quantidade
+    # adicional é zero: um pedido grande e tardio não apaga uma ruptura anterior.
+    if recomendacao["risco_antes_reposicao"]:
+        prioridade = "critica"
+        if recomendacao["status"] != "horizonte_insuficiente":
+            recomendacao["status"] = "revisar_entrega_urgente"
+    elif (
+        recomendacao["prazo_compra_vencido"]
+        or recomendacao["status_agendamento"] == "comprar_agora"
+        or (primeira_falta is not None and (primeira_falta - origem).days <= revisao)
+    ):
+        prioridade = "alta"
+    elif (
+        primeira_seguranca is not None
+        or recomendacao["status"] == "horizonte_insuficiente"
+        or recomendacao["excesso"]
+    ):
+        prioridade = "media"
+    else:
+        prioridade = "baixa"
+    recomendacao["prioridade"] = prioridade
+    recomendacao["prioridade_ordem"] = {
+        "critica": 1,
+        "alta": 2,
+        "media": 3,
+        "baixa": 4,
+    }[prioridade]
+    recomendacao["motivos_alerta"] = "; ".join(motivos)
+
+
 def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_dias=7):
     """Retorna saldos diários e sugestões sujeitas a revisão humana.
 
-    Recebimentos ocorrem antes das vendas previstas do dia. Uma compra nova,
-    se aprovada hoje, chegaria em ``origem + prazo_dias``. O alerta anterior à
-    reposição exclui o próprio dia da chegada. O estoque-alvo cobre prazo +
-    revisão e segurança; apenas pedidos que chegam dentro dessa janela reduzem
-    a quantidade sugerida. Excesso é uma triagem de 30 dias e fica indefinido
-    quando a previsão não cobre esse período.
+    A referência é o fechamento de um dia. Recebimentos futuros ocorrem antes das
+    vendas previstas do dia; compras feitas em um fechamento chegam em
+    ``data_compra + max(1, prazo_dias)``. Assim, prazo zero significa a próxima
+    manhã, sem usar uma compra posterior para cobrir vendas que já aconteceram.
+
+    O prazo teórico de compra é a primeira passagem estrita abaixo da segurança
+    menos esse prazo efetivo. A data acionável nunca precede a referência; o
+    prazo teórico pode estar vencido. O tamanho é o maior déficit de segurança
+    diário após a chegada até ``data_compra + prazo_dias + revisao_dias``, com
+    mínimo e lote. A janela precisa estar totalmente prevista. Sem passagem
+    abaixo da segurança, o momento da próxima compra permanece desconhecido.
+
+    ``compra_sugerida`` dimensiona comprar agora; ``quantidade_compra_na_data``
+    recalcula a janela deslocada para a data programada. O alvo agregado e a
+    posição são informativos: só o caminho diário detecta pedidos tardios.
+    Excesso usa 30 dias e fica indefinido sem essa cobertura.
     """
     revisao_dias = _inteiro(revisao_dias, "revisao_dias", minimo=1, maximo=30)
     _colunas(previsoes, ["sku", "data", "previsao"], "Previsões")
@@ -175,6 +331,20 @@ def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_di
             "unidades_acima_alvo_30dias": None,
             "horizonte_necessario": janela,
             "dias_previstos": len(projecao),
+            "primeira_abaixo_seguranca": None,
+            "dias_ate_falta": None,
+            "dias_ate_seguranca": None,
+            "data_limite_compra": None,
+            "data_compra_sugerida": None,
+            "data_entrega_compra_sugerida": None,
+            "quantidade_compra_na_data": None,
+            "horizonte_necessario_agendamento": None,
+            "prazo_compra_vencido": None,
+            "falta_antes_entrega_compra": None,
+            "status_agendamento": "sem_previsao",
+            "prioridade": "indefinida",
+            "prioridade_ordem": 5,
+            "motivos_alerta": "Sem previsão para calcular prazo e quantidade de compra",
             "status": "sem_previsao",
             "status_previsao": None,
         }
@@ -191,7 +361,7 @@ def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_di
             raise ValueError(
                 f"{sku}: previsões devem ser diárias, consecutivas e começar na mesma data."
             )
-        chegada_reposicao = origem + pd.Timedelta(days=prazo)
+        chegada_reposicao = origem + pd.Timedelta(days=max(1, prazo))
         fim_janela = origem + pd.Timedelta(days=janela)
         consideradas = ordens["data_entrega"].le(fim_janela)
         em_transito = int(ordens.loc[consideradas, "quantidade"].sum())
@@ -212,9 +382,13 @@ def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_di
         )
         recebimentos = ordens.groupby("data_entrega")["quantidade"].sum()
         saldo = float(estoque)
+        caminho_saldos = []
+        if estoque < seguranca:
+            recomendacao["primeira_abaixo_seguranca"] = origem
         for data, quantidade in zip(projecao["data"], projecao["previsao"]):
             recebido = int(recebimentos.get(data, 0))
             saldo += recebido - float(quantidade)
+            caminho_saldos.append(saldo)
             risco = saldo < -1e-9
             linhas_saldos.append(
                 {
@@ -226,6 +400,11 @@ def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_di
                     "risco_falta": risco,
                 }
             )
+            if (
+                saldo < seguranca - 1e-9
+                and recomendacao["primeira_abaixo_seguranca"] is None
+            ):
+                recomendacao["primeira_abaixo_seguranca"] = data
             if risco:
                 if recomendacao["primeira_falta"] is None:
                     recomendacao["primeira_falta"] = data
@@ -237,12 +416,14 @@ def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_di
 
         if len(projecao) >= janela:
             alvo = float(projecao["previsao"].iloc[:janela].sum() + seguranca)
-            necessidade = max(0.0, alvo - (estoque + em_transito))
-            # Tolerância numérica evita um lote inteiro por um resíduo de regressão.
-            compra = (
-                math.ceil((max(necessidade, minimo) - 1e-9) / lote) * lote
-                if necessidade > 1e-9
-                else 0
+            compra = _quantidade_na_data(
+                pd.Series(caminho_saldos, index=projecao["data"]),
+                origem,
+                prazo,
+                revisao_dias,
+                seguranca,
+                minimo,
+                lote,
             )
             recomendacao.update(
                 {
@@ -263,6 +444,16 @@ def planejar_estoque(previsoes, produtos, fornecedores, pedidos=None, revisao_di
             acima = max(0.0, estoque + recebido_30dias - alvo_30dias)
             recomendacao["excesso"] = acima > 1e-9
             recomendacao["unidades_acima_alvo_30dias"] = acima
+        _agendar_compra(
+            recomendacao,
+            pd.Series(caminho_saldos, index=projecao["data"]),
+            origem,
+            prazo,
+            revisao_dias,
+            seguranca,
+            minimo,
+            lote,
+        )
         recomendacoes.append(recomendacao)
 
     return (

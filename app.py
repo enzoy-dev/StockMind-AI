@@ -58,8 +58,35 @@ LABELS = {
     "pedido_minimo": "Mínimo de compra",
     "multiplo_compra": "Múltiplo de compra",
     "pedido_id": "Pedido",
+    "data_limite_compra": "Data-limite para comprar",
+    "data_compra_sugerida": "Comprar em",
+    "data_entrega_compra_sugerida": "Entrega estimada da nova compra",
+    "quantidade_compra_na_data": "Quantidade na data sugerida",
+    "primeira_abaixo_seguranca": "Primeiro saldo abaixo da segurança",
+    "dias_ate_falta": "Dias até a falta",
+    "dias_ate_seguranca": "Dias até atingir a segurança",
+    "prioridade": "Prioridade",
+    "motivos_alerta": "Motivo da revisão",
+    "unidades_acima_alvo_30dias": "Unidades acima do alvo de 30 dias",
+    "status_agendamento": "Situação do agendamento",
+    "cenario": "Cenário",
+    "horizonte": "Horizonte (dias)",
+    "mae_teste_semana_anterior": "MAE teste: referência semanal",
+    "ganho_mae_teste_pct": "Redução do MAE vs. semana anterior (%)",
+    "horizonte_necessario_agendamento": "Dias necessários para dimensionar compra futura",
 }
 SITUATIONS = {
+    "critica": "Crítica",
+    "alta": "Alta",
+    "media": "Média",
+    "baixa": "Baixa",
+    "indefinida": "Indefinida",
+    "revisar_entrega_urgente": "Revisar entrega urgente",
+    "sem_gatilho_no_horizonte": "Sem necessidade de compra identificada neste horizonte",
+    "sem_compra_adicional": "Pedidos existentes cobrem a entrega possível; revisar falta anterior",
+    "prazo_vencido": "Prazo teórico vencido",
+    "comprar_agora": "Comprar na data de referência",
+    "compra_programada": "Compra futura sugerida",
     "revisar_compra": "Revisar compra",
     "acompanhar": "Acompanhar",
     "horizonte_insuficiente": "Aumente o horizonte",
@@ -79,15 +106,28 @@ def tabela(frame, columns=None):
     view = frame.copy()
     if columns:
         view = view[[column for column in columns if column in view]]
-    for campo in ("status", "status_previsao"):
+    for campo in ("status", "status_previsao", "status_agendamento", "prioridade"):
         if campo in view:
-            view[campo] = view[campo].map(lambda v: SITUATIONS.get(v, v))
+            view[campo] = view[campo].map(
+                lambda v: (
+                    SITUATIONS.get(v, v.replace("_", " ").capitalize())
+                    if isinstance(v, str)
+                    else v
+                )
+            )
     st.dataframe(view.rename(columns=LABELS), hide_index=True, use_container_width=True)
 
 
 def baixar(label, records, filename):
     data = pd.DataFrame(records).to_csv(index=False).encode("utf-8-sig")
     st.download_button(label, data, filename, "text/csv", key=filename)
+
+
+def precisam_revisao(recomendacoes):
+    """Inclui compra futura por segurança mesmo sem falta física no horizonte."""
+    return recomendacoes["prioridade"].isin(
+        ["critica", "alta", "media", "indefinida"]
+    ) | recomendacoes["status_previsao"].eq("historico_curto")
 
 
 def cadastros(vendas, origem, store, exemplo):
@@ -180,9 +220,27 @@ def cadastros(vendas, origem, store, exemplo):
 
 
 @st.cache_data(max_entries=4, ttl=300, show_spinner="Avaliando métodos por produto…")
-def calcular(vendas, horizonte, contexto, produtos, fornecedores, pedidos, revisao):
+def calcular(
+    vendas,
+    horizonte,
+    contexto,
+    produtos,
+    fornecedores,
+    pedidos,
+    revisao,
+    comparar=False,
+    variacao=20.0,
+):
     return executar_analise(
-        vendas, horizonte, contexto, produtos, fornecedores, pedidos, revisao
+        vendas,
+        horizonte,
+        contexto,
+        produtos,
+        fornecedores,
+        pedidos,
+        revisao,
+        comparar_horizontes=comparar,
+        variacao_cenario_pct=variacao,
     )
 
 
@@ -295,6 +353,13 @@ def main():
     st.caption(
         "A avaliação usa o mesmo horizonte escolhido. Históricos curtos geram estimativas iniciais sem métricas ou faixas inventadas."
     )
+    comparar = st.checkbox(
+        "Comparar 7, 14 e 30 dias", value=exemplo, key=f"comparar_{origem}"
+    )
+    if comparar:
+        st.caption(
+            "Cada horizonte tem sua própria seleção e teste. Se usar contexto planejado, o calendário deve cobrir pelo menos 30 dias."
+        )
     try:
         if exemplo:
             st.info(
@@ -347,8 +412,21 @@ def main():
             if produtos is not None
             else 7
         )
+        variacao = (
+            float(st.slider("Variação de demanda nos cenários (%)", 0, 80, 20, step=5))
+            if produtos is not None
+            else 20.0
+        )
         resultado = calcular(
-            vendas, horizonte, contexto, produtos, fornecedores, pedidos, revisao
+            vendas,
+            horizonte,
+            contexto,
+            produtos,
+            fornecedores,
+            pedidos,
+            revisao,
+            comparar,
+            variacao,
         )
     except DataError as erro:
         st.error(str(erro))
@@ -370,7 +448,7 @@ def main():
     st.caption(
         f"Data de referência: {resultado['origem']}. A previsão começa no dia seguinte ao histórico."
     )
-    cards = st.columns(3)
+    cards = st.columns(4)
     cards[0].metric("Produtos com previsão", previsoes["sku"].nunique())
     cards[1].metric(
         "Com déficit projetado",
@@ -382,6 +460,12 @@ def main():
         "Possível excesso (30 dias)",
         int(recomendacoes["excesso"].eq(True).sum())
         if not recomendacoes.empty and recomendacoes["excesso"].notna().any()
+        else "—",
+    )
+    cards[3].metric(
+        "Revisão urgente",
+        int(recomendacoes["prioridade"].isin(["critica", "alta"]).sum())
+        if not recomendacoes.empty
         else "—",
     )
     if st.button("Salvar análise e entradas no histórico", type="primary"):
@@ -396,7 +480,9 @@ def main():
             )
             planning = {"produtos": p, "fornecedores": f, "pedidos": o}
         future = (
-            validar_contexto_futuro(contexto, vendas, horizonte)
+            validar_contexto_futuro(
+                contexto, vendas, max(horizonte, 30) if comparar else horizonte
+            )
             if contexto is not None
             else None
         )
@@ -404,13 +490,24 @@ def main():
             resultado,
             vendas,
             contexto_futuro=future,
-            parametros={"horizonte": horizonte, "revisao_dias": revisao},
+            parametros={
+                "horizonte": horizonte,
+                "revisao_dias": revisao,
+                "comparar_horizontes": comparar,
+                "variacao_cenario_pct": variacao,
+            },
             **planning,
         )
         st.success(f"Análise salva: {run_id}")
 
-    forecasts_tab, stock_tab, quality_tab, history_tab = st.tabs(
-        ["Previsões", "Estoque e compras", "Qualidade dos dados", "Histórico"]
+    stock_tab, forecasts_tab, scenarios_tab, quality_tab, history_tab = st.tabs(
+        [
+            "Decisões de reposição",
+            "Previsões",
+            "Cenários de demanda",
+            "Qualidade dos dados",
+            "Histórico",
+        ]
     )
     with forecasts_tab:
         sku = st.selectbox("Produto", sorted(previsoes["sku"].unique()))
@@ -454,6 +551,31 @@ def main():
                 ranking,
                 ["sku", "modelo", "mae_teste", "wape_teste", "vies_teste", "status"],
             )
+        if resultado["comparacao_horizontes"]:
+            st.subheader("Qual método funciona melhor em cada horizonte?")
+            comparacao = pd.DataFrame(resultado["comparacao_horizontes"])
+            tabela(
+                comparacao.loc[comparacao["sku"].eq(sku)],
+                [
+                    "horizonte",
+                    "modelo",
+                    "mae_validacao",
+                    "mae_teste",
+                    "mae_teste_semana_anterior",
+                    "ganho_mae_teste_pct",
+                    "wape_teste",
+                    "janelas_validacao",
+                    "status",
+                ],
+            )
+            st.caption(
+                "Redução positiva do MAE indica erro menor que repetir a semana anterior; negativa indica erro maior. O teste não escolhe o método. Os períodos de teste diferem entre horizontes; não interprete a tabela como comparação de precisão em datas idênticas."
+            )
+            baixar(
+                "Baixar comparação de horizontes",
+                resultado["comparacao_horizontes"],
+                "comparacao_horizontes.csv",
+            )
         baixar("Baixar todas as previsões", resultado["previsoes"], "previsoes.csv")
         baixar("Baixar métricas por produto", resultado["metricas"], "metricas.csv")
     with stock_tab:
@@ -463,8 +585,22 @@ def main():
             )
         else:
             st.subheader("Prioridades para revisão")
+            st.caption(
+                f"Datas e prioridades referem-se ao fechamento de {resultado['origem']}. Sem cruzamento do limite no período previsto, não se afirma que o estoque durará indefinidamente."
+            )
             filtro = st.text_input("Buscar por SKU ou nome")
             problemas = st.checkbox("Mostrar somente itens que precisam de revisão")
+            grupo = st.radio(
+                "Decisão a revisar",
+                [
+                    "Todas",
+                    "Falta ou prazo vencido",
+                    "Compras futuras",
+                    "Excesso",
+                    "Dados insuficientes",
+                ],
+                horizontal=True,
+            )
             view = recomendacoes.copy()
             if filtro:
                 view = view.loc[
@@ -472,17 +608,28 @@ def main():
                     | view["nome"].str.contains(filtro, case=False, regex=False)
                 ]
             if problemas:
+                view = view.loc[precisam_revisao(view)]
+            if grupo == "Falta ou prazo vencido":
                 view = view.loc[
                     view["primeira_falta"].notna()
-                    | view["excesso"].eq(True)
-                    | ~view["status"].eq("acompanhar")
+                    | view["prazo_compra_vencido"].eq(True)
                 ]
-            view = view.assign(
-                _falta=view["primeira_falta"].notna(), _excesso=view["excesso"].eq(True)
-            )
-            view = view.sort_values(
-                ["_falta", "_excesso", "sku"], ascending=[False, False, True]
-            )
+            elif grupo == "Compras futuras":
+                view = view.loc[
+                    view["data_compra_sugerida"].fillna("").gt(resultado["origem"])
+                ]
+            elif grupo == "Excesso":
+                view = view.loc[view["excesso"].eq(True)]
+            elif grupo == "Dados insuficientes":
+                view = view.loc[
+                    view["status"].isin(["sem_previsao", "horizonte_insuficiente"])
+                    | view["status_previsao"].eq("historico_curto")
+                    | view["status_agendamento"].eq("horizonte_insuficiente")
+                ]
+            if "prioridade_ordem" in view:
+                view = view.sort_values(
+                    ["prioridade_ordem", "dias_ate_falta", "sku"], na_position="last"
+                )
             provisorios = view.loc[
                 view["status_previsao"].eq("historico_curto"), "sku"
             ].tolist()
@@ -491,27 +638,43 @@ def main():
                     "Sugestões provisórias por histórico curto: "
                     + ", ".join(provisorios)
                 )
-            tabela(
-                view,
-                [
+            colunas_decisao = [
+                "sku",
+                "nome",
+                "prioridade",
+                "data_compra_sugerida",
+                "quantidade_compra_na_data",
+                "dias_ate_falta",
+                "unidades_acima_alvo_30dias",
+                "motivos_alerta",
+            ]
+            if grupo == "Excesso":
+                colunas_decisao = [
                     "sku",
                     "nome",
+                    "prioridade",
                     "estoque_atual",
-                    "compra_sugerida",
-                    "primeira_falta",
-                    "risco_antes_reposicao",
+                    "unidades_acima_alvo_30dias",
                     "excesso",
-                    "horizonte_necessario",
-                    "status",
+                    "motivos_alerta",
+                ]
+            elif grupo == "Dados insuficientes":
+                colunas_decisao = [
+                    "sku",
+                    "nome",
+                    "prioridade",
                     "status_previsao",
-                ],
-            )
+                    "status_agendamento",
+                    "horizonte_necessario_agendamento",
+                    "motivos_alerta",
+                ]
+            tabela(view, colunas_decisao)
             st.warning(
-                "Sugestões exigem revisão humana. Saldo negativo é déficit estimado, não estoque físico negativo. As compras sugeridas não são enviadas nem entram nos recebimentos. Se o horizonte não cobre prazo + revisão, a compra fica indefinida."
+                "Sugestões exigem revisão humana. A data-limite pode já ter passado: uma compra feita na referência não evita faltas anteriores à entrega. Saldo negativo é déficit estimado. Compras sugeridas não entram como recebimentos. Sem cobertura da janela de compra futura, a quantidade fica indefinida."
             )
             with st.expander("Cálculos de reposição e pedidos na janela"):
                 st.write(
-                    "Alvo = previsão no prazo do fornecedor + período de revisão + segurança informada. Compra = alvo − disponível − pedidos que chegam nessa janela; se positiva, aplica mínimo e múltiplo de compra. Pedidos posteriores não cobrem faltas anteriores. Excesso compara posição com previsão de 30 dias + segurança; pode ser intencional em fornecedores de prazo longo."
+                    "A data-limite deriva do primeiro saldo abaixo da segurança, descontando o prazo do fornecedor. O agendamento considera compra ao fechar o dia e prazo efetivo de pelo menos um dia. A quantidade cobre o maior déficit em relação à segurança após a entrega, na janela de proteção, aplicando mínimo e lote. Compras futuras usam uma janela deslocada; compra_sugerida representa comprar na data-base. Excesso compara posição com previsão de 30 dias + segurança."
                 )
                 tabela(recomendacoes)
             if not saldos.empty:
@@ -538,6 +701,57 @@ def main():
                 "reposicao.csv",
             )
             baixar("Baixar saldo projetado", resultado["saldos"], "saldos.csv")
+    with scenarios_tab:
+        st.subheader("Como uma demanda diferente muda a reposição?")
+        st.caption(
+            f"Análise de sensibilidade escolhida por você: demanda menor/base/maior em {resultado['variacao_cenario_pct']:g}%. As trajetórias não têm probabilidade atribuída e não são os limites estatísticos de 90% do modelo."
+        )
+        if not resultado["cenarios"]:
+            st.info("Ative o planejamento de estoque para comparar cenários.")
+        else:
+            resumo_cenarios = pd.DataFrame(resultado["cenarios"])
+            sku_cenario = st.selectbox(
+                "Produto nos cenários", sorted(resumo_cenarios["sku"].unique())
+            )
+            tabela(
+                resumo_cenarios.loc[resumo_cenarios["sku"].eq(sku_cenario)],
+                [
+                    "cenario",
+                    "data_compra_sugerida",
+                    "quantidade_compra_na_data",
+                    "compra_sugerida",
+                    "primeira_falta",
+                    "dias_ate_falta",
+                    "unidades_acima_alvo_30dias",
+                    "prioridade",
+                    "status_agendamento",
+                ],
+            )
+            trajetorias = pd.DataFrame(resultado["saldos_cenarios"])
+            if not trajetorias.empty:
+                trajetorias = trajetorias.loc[trajetorias["sku"].eq(sku_cenario)].copy()
+            if not trajetorias.empty:
+                trajetorias["data"] = pd.to_datetime(trajetorias["data"])
+                st.line_chart(
+                    trajetorias.pivot(
+                        index="data", columns="cenario", values="saldo_estimado"
+                    )
+                )
+            else:
+                st.info("Sem histórico para projetar saldo deste produto.")
+            st.write(
+                "Estoque, pedidos abertos, preços, segurança, mínimos e lotes são mantidos. Só as vendas previstas mudam; os modelos não são treinados novamente e nenhuma compra é realizada."
+            )
+            baixar(
+                "Baixar recomendações dos cenários",
+                resultado["cenarios"],
+                "cenarios.csv",
+            )
+            baixar(
+                "Baixar saldos dos cenários",
+                resultado["saldos_cenarios"],
+                "saldos_cenarios.csv",
+            )
     with quality_tab:
         st.subheader("Relatório de importação")
         if resultado["qualidade"]:

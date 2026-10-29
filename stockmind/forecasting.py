@@ -20,11 +20,14 @@ MODELOS = (
     "Croston-SBA",
     "Regressão linear",
     "Regressão com dia da semana",
+    "Regressão com atrasos",
 )
+MODELO_ATRASOS = "Regressão com atrasos"
 MODELO_CONTEXTO = "Regressão com contexto"
 MODELO_INICIAL = "Estimativa inicial (média observada)"
 COLUNAS_CONTEXTO = ("preco", "promocao", "feriado")
 MIN_TREINO = 14
+MIN_TREINO_ATRASOS = 42
 NIVEL_FAIXA = 0.90
 
 
@@ -58,6 +61,46 @@ def _croston_sba(vendas, alpha=0.1):
     return float((1 - alpha / 2) * tamanho / intervalo)
 
 
+def _prever_com_atrasos(dados, horizonte):
+    """Ridge com parâmetros fixos e previsão recursiva sem teacher forcing.
+
+    Cada linha de treinamento usa somente vendas anteriores ao seu alvo. Na
+    projeção, valores futuros de atrasos e médias vêm das próprias previsões.
+    O ajuste do padronizador também ocorre somente no histórico recebido.
+    """
+    if len(dados) < MIN_TREINO_ATRASOS:
+        raise ValueError("A regressão com atrasos precisa de pelo menos 42 dias.")
+    vendas = dados["vendas"].to_numpy(dtype=float)
+    inicio = dados["data"].iloc[0]
+    treino = criar_atributos(dados["data"], inicio, True).iloc[14:].copy()
+    treino["atraso_1"] = vendas[13:-1]
+    treino["atraso_7"] = vendas[7:-7]
+    treino["atraso_14"] = vendas[:-14]
+    serie = pd.Series(vendas)
+    treino["media_7"] = serie.rolling(7).mean().shift(1).iloc[14:].to_numpy()
+    treino["media_14"] = serie.rolling(14).mean().shift(1).iloc[14:].to_numpy()
+    modelo = make_pipeline(StandardScaler(), Ridge(alpha=10.0))
+    modelo.fit(treino, vendas[14:])
+
+    datas = pd.date_range(
+        dados["data"].iloc[-1] + pd.Timedelta(days=1), periods=horizonte
+    )
+    calendario = criar_atributos(datas, inicio, True)
+    historico = vendas.tolist()
+    previsoes = []
+    for passo in range(horizonte):
+        atributos = calendario.iloc[[passo]].copy()
+        atributos["atraso_1"] = historico[-1]
+        atributos["atraso_7"] = historico[-7]
+        atributos["atraso_14"] = historico[-14]
+        atributos["media_7"] = float(np.mean(historico[-7:]))
+        atributos["media_14"] = float(np.mean(historico[-14:]))
+        valor = max(0.0, float(modelo.predict(atributos)[0]))
+        previsoes.append(valor)
+        historico.append(valor)
+    return np.asarray(previsoes)
+
+
 def prever_com_modelo(dados, nome, horizonte=7, contexto_futuro=None):
     """Projeta exatamente o horizonte pedido, sem consultar vendas futuras."""
     vendas = dados["vendas"].to_numpy(dtype=float)
@@ -74,6 +117,8 @@ def prever_com_modelo(dados, nome, horizonte=7, contexto_futuro=None):
         return np.full(horizonte, vendas[-janela:].mean())
     if nome == "Croston-SBA":
         return np.full(horizonte, _croston_sba(vendas))
+    if nome == MODELO_ATRASOS:
+        return _prever_com_atrasos(dados, horizonte)
     if nome not in ("Regressão linear", "Regressão com dia da semana", MODELO_CONTEXTO):
         raise ValueError("Modelo desconhecido.")
 
@@ -210,7 +255,15 @@ def _analisar_sku(dados, horizonte, contexto):
         largura = None
         status = "historico_curto"
     else:
-        nomes = (*MODELOS, MODELO_CONTEXTO) if contexto_ok else MODELOS
+        # Um candidato deve poder treinar em TODAS as origens da comparação.
+        # A disponibilidade depende do tamanho do treino, nunca do erro de teste.
+        nomes = tuple(
+            nome
+            for nome in MODELOS
+            if nome != MODELO_ATRASOS or min(origens) >= MIN_TREINO_ATRASOS
+        )
+        if contexto_ok:
+            nomes = (*nomes, MODELO_CONTEXTO)
         metricas = []
         escolhido, menor_erro = None, math.inf
         larguras = {}
@@ -327,7 +380,35 @@ def _analisar_sku(dados, horizonte, contexto):
         "teste_fim",
     ):
         avaliacao[coluna] = pd.to_datetime(avaliacao[coluna])
+    semanal = avaliacao.loc[avaliacao["modelo"].eq("Semana anterior"), "mae_teste"]
+    mae_semanal = float(semanal.iloc[0]) if len(semanal) else np.nan
+    avaliacao["mae_teste_semana_anterior"] = mae_semanal
+    avaliacao["ganho_mae_teste_pct"] = (
+        (mae_semanal - avaliacao["mae_teste"]) / mae_semanal * 100
+        if math.isfinite(mae_semanal) and mae_semanal > 0
+        else np.nan
+    )
     return previsoes, avaliacao
+
+
+def _recortar_contexto(vendas, contexto_futuro, horizonte):
+    """Reutiliza o mesmo calendário planejado, sem exigir um CSV para cada h."""
+    if contexto_futuro is None:
+        return None
+    if not {"sku", "data"}.issubset(contexto_futuro.columns):
+        return contexto_futuro
+    partes = []
+    for sku, grupo in vendas.groupby("sku", sort=True):
+        origem = grupo["data"].max()
+        limite = origem + pd.Timedelta(days=horizonte)
+        partes.append(
+            contexto_futuro.loc[
+                contexto_futuro["sku"].eq(sku)
+                & contexto_futuro["data"].gt(origem)
+                & contexto_futuro["data"].le(limite)
+            ]
+        )
+    return pd.concat(partes, ignore_index=True)
 
 
 def analisar_previsoes(vendas, horizonte=7, contexto_futuro=None):
@@ -347,6 +428,7 @@ def analisar_previsoes(vendas, horizonte=7, contexto_futuro=None):
         raise ValueError("Horizonte deve ser 7, 14, 30 ou 90 dias.")
     if vendas.empty or not {"sku", "data", "vendas"}.issubset(vendas.columns):
         raise ValueError("Informe histórico validado com sku, data e vendas.")
+    contexto_futuro = _recortar_contexto(vendas, contexto_futuro, int(horizonte))
     previsoes, metricas = [], []
     for sku, grupo in vendas.groupby("sku", sort=True):
         grupo = grupo.sort_values("data").reset_index(drop=True)
@@ -363,3 +445,29 @@ def analisar_previsoes(vendas, horizonte=7, contexto_futuro=None):
     return pd.concat(previsoes, ignore_index=True), pd.concat(
         metricas, ignore_index=True
     )
+
+
+def comparar_horizontes(vendas, contexto_futuro=None, horizontes=(7, 14, 30)):
+    """Resume o método escolhido na validação em cada SKU/horizonte.
+
+    A comparação de MAE de teste com a referência semanal é somente um relatório;
+    nunca seleciona o método. Os testes têm durações e datas distintas por h,
+    portanto os números não constituem uma comparação de dificuldade equivalente.
+    Um ganho positivo significa MAE menor que o semanal, negativo significa maior.
+    Quando o MAE semanal é zero ou ausente, o ganho relativo fica indefinido.
+    """
+    horizontes = tuple(horizontes)
+    if not horizontes or len(set(horizontes)) != len(horizontes):
+        raise ValueError("Informe horizontes distintos e não vazios.")
+    resumos = []
+    for horizonte in horizontes:
+        contexto = _recortar_contexto(vendas, contexto_futuro, horizonte)
+        _, metricas = analisar_previsoes(vendas, horizonte, contexto)
+        selecionados = metricas.loc[metricas["selecionado"]].copy()
+        selecionados["horizonte"] = horizonte
+        selecionados["comparacao_observacao"] = (
+            "Método escolhido pela validação; ganho no teste é apenas relatório. "
+            "Horizontes diferentes têm semanas e durações de teste distintas."
+        )
+        resumos.append(selecionados)
+    return pd.concat(resumos, ignore_index=True)
