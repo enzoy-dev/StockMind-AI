@@ -1,36 +1,41 @@
 # StockMind-AI
 
-Uma primeira experiência com Machine Learning: ler o histórico de vendas de
-**um produto**, prever os próximos **sete dias** e visualizar o resultado.
+Previsão de vendas por produto e planejamento de estoque com Python, scikit-learn,
+Streamlit, FastAPI e SQLite. Compara métodos em períodos históricos, projeta saldos
+com recebimentos e acompanha previsões salvas quando novas vendas chegam.
 
-Esta versão é pequena de propósito. Compara regressões lineares e referências
-simples em uma interface Streamlit. Não exige chave de API, GPU ou banco de dados.
+**Aplicação local em desenvolvimento.** Os exemplos são fictícios; resultados
+nesses exemplos não comprovam redução de faltas ou desempenho em uma empresa real.
 
-## O que funciona
+## Funcionalidades
 
-- Abrir o exemplo fictício ou enviar um CSV próprio.
-- Aprender tendência e diferenças de vendas entre os dias da semana.
-- Comparar a regressão original com a regressão semanal e duas referências simples.
-- Escolher o método pelo erro em uma semana de validação.
-- Exibir vendas registradas, previsão e uma tabela dos próximos sete dias.
-- Mostrar o erro em uma semana de teste separada do treinamento e da seleção.
+- CSV com vários produtos; formato original `data,vendas` continua aceito.
+- Previsões de 7, 14, 30 ou 90 dias, avaliadas no horizonte escolhido.
+- Até três janelas temporais para seleção e um teste final separado.
+- Referências simples, regressões, Croston-SBA para vendas esporádicas e modelo
+  contextual quando preços/promoções/feriados futuros são conhecidos.
+- Faixas empíricas de 90%, calibradas em período independente quando há dados.
+- Estimativas iniciais explícitas para históricos curtos; produtos sem vendas
+  no catálogo ficam sem previsão, em vez de receber zero artificial.
+- Cadastro de produtos, fornecedores, estoque de segurança, lotes e pedidos abertos.
+- Saldo diário, possível falta/excesso e sugestões de compra para revisão humana.
+- Dashboard com filtros, gráficos interativos e exportação de CSVs.
+- SQLite com snapshots de entradas/previsões e comparação com vendas posteriores.
+- API para análise, cadastros e atualização de vendas realizadas.
+- Relatório de qualidade, testes e CI para Linux e Windows.
 
-Estoque, alertas, recomendações de compra, vários produtos e modelos mais complexos
-ficam para versões futuras. Não é um sistema pronto para empresas.
+Não envia compras nem atualiza estoque de um ERP. O estoque informado é um snapshot
+na data final do histórico, e não um livro de movimentações de estoque.
 
-## Executar no Windows
+## Rodar o dashboard
 
-Python 3.12 recomendado. No terminal do VS Code, dentro da pasta do projeto:
+Python 3.12 recomendado. No PowerShell, dentro desta pasta:
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
-
-Abra o endereço local mostrado no terminal, normalmente `http://localhost:8501`.
-O exemplo já vem incluído. Não é necessário ativar o ambiente virtual para usar
-os comandos acima.
 
 No Linux/macOS:
 
@@ -40,98 +45,127 @@ python3 -m venv .venv
 .venv/bin/python -m streamlit run app.py
 ```
 
-## Seu CSV
+Abra o endereço local informado pelo Streamlit. Não é necessária chave de IA,
+GPU ou serviço externo.
 
-Use somente as colunas `data` e `vendas`, separadas por vírgula:
+1. **Carteira fictícia** já inclui vendas, fornecedores, estoque, pedidos e plano
+   futuro de contexto. Possui três produtos com 420 dias, um com 10 dias e um
+   produto cadastrado sem vendas. A origem é **20/10/2026**, independentemente de hoje.
+2. **Exemplo de um produto** mantém o CSV original de 60 dias.
+3. **Enviar CSV** aceita seus dados. Cadastros de estoque podem ser editados na
+   tela, importados ou carregados do SQLite.
+4. Escolha o horizonte e confira previsões, métricas, prioridades e qualidade.
+5. **Salvar análise e entradas no histórico** registra um snapshot. Salvar não
+   equivale a aprovar compras. Depois, registre novas vendas para comparar.
+
+A análise é calculada em memória e pode ficar em cache por até cinco minutos.
+A gravação de entradas e resultados ocorre por ações explícitas; abrir a interface
+pode criar o arquivo SQLite vazio. Não coloque arquivos privados no repositório.
+
+## Dados e planejamento
+
+[Contratos completos dos CSVs e exemplos](docs/dados.md).
+
+Vendas mínimas:
 
 ```csv
-data,vendas
-2026-08-01,12
-2026-08-02,15
-2026-08-03,13
+sku,data,vendas
+CAF-001,2026-10-19,18
+CAF-001,2026-10-20,20
 ```
 
-O trecho acima ilustra o formato; o arquivo completo precisa de **pelo menos
-30 dias consecutivos**. Consulte [vendas_exemplo.csv](vendas_exemplo.csv), que
-contém 60 dias inventados, de um único produto, para demonstração.
+Uma linha por dia/produto, datas consecutivas e mesma data final para todos os
+produtos. Lacunas não são preenchidas com zero. Históricos de um dia são aceitos
+com estimativa inicial e aviso, sem alegar validação.
 
-- `data`: formato YYYY-MM-DD, uma linha por dia.
-- `vendas`: quantidade de unidades, inteira e não negativa; não é faturamento.
-- Não misture produtos, nem use linhas de transações individuais sem agregá-las.
-- Datas duplicadas, lacunas e números inválidos são rejeitados.
-- Inclua zero somente se houver confirmação de que não houve vendas naquele dia.
+Preço, promoção e feriado são opcionais. O modelo contextual só é comparado quando
+há histórico **e plano futuro completos** desses campos; eles devem ter sido
+conhecidos antes das previsões, inclusive na avaliação histórica.
 
-A previsão começa no dia seguinte ao **último dia do arquivo**, não
-necessariamente amanhã. Arquivos enviados não são gravados pelo aplicativo.
-Use localmente: esta versão não tem login nem configuração de hospedagem pública.
-Não adicione dados privados ao repositório.
+A compra sugerida considera demanda prevista no prazo do fornecedor + revisão,
+segurança informada e pedidos que chegam dentro dessa janela. Aplica mínimo e
+múltiplo somente se existir necessidade. Datas exatas dos pedidos entram no saldo;
+um pedido tardio pode reduzir a compra agregada e ainda deixar uma falta antes
+que ele chegue. O dashboard mantém o alerta de déficit nesse caso.
 
-## Métodos comparados
+Se a previsão não cobrir prazo + revisão, a sugestão fica indefinida com o horizonte
+necessário. Excesso é uma triagem de 30 dias, indisponível em horizontes menores.
+Compras de produtos com histórico curto são provisórias. Segurança não é estimada
+automaticamente; vencimento, orçamento e custo de falta não são otimizados.
 
-| Método | Como prevê |
-| --- | --- |
-| Última venda | Repete o último valor conhecido em todos os próximos sete dias |
-| Semana anterior | Repete a venda do mesmo dia da semana anterior |
-| Regressão linear | Aprende uma tendência de crescimento ou queda com a passagem dos dias |
-| Regressão com dia da semana | Aprende a tendência e diferenças entre segunda, terça, etc. |
+## Modelagem e limites
 
-A regressão semanal usa indicadores de categoria para os dias da semana, com
-segunda-feira como referência. Por exemplo, pode aprender que sábado costuma
-vender mais, mantendo uma tendência de crescimento. Não é usado um número
-ordinal para supor que domingo vale mais que segunda. Previsões negativas são
-limitadas a zero.
+[Metodologia, separação temporal e avaliação sintética](docs/avaliacao.md).
 
-## Seleção e avaliação temporal
+| Horizonte | Dias mínimos para seleção + teste | Dias mínimos para faixas |
+| --- | ---: | ---: |
+| 7 | 28 | 42 |
+| 14 | 42 | 70 |
+| 30 | 74 | 134 |
+| 90 | 194 | 374 |
 
-O dashboard mostra o **MAE**, erro absoluto médio em unidades por dia. Quanto
-menor, melhor; não é uma porcentagem de acerto. Os dados são divididos em ordem
-cronológica, sem embaralhar:
+Os números acima usam treino inicial mínimo de 14 dias. A quantidade de janelas
+cresce até três conforme o histórico disponível. Séries curtas usam a média dos
+últimos até 14 dias, sem métricas ou faixas artificiais.
 
-```text
-histórico inicial | validação: penúltimos 7 dias | teste: últimos 7 dias
-```
+MAE/viés em unidades por dia; WAPE/cobertura em porcentagem. Viés positivo indica
+superestimação. WAPE fica vazio quando as vendas reais somam zero. O teste final
+não escolhe o método nem a largura da faixa.
 
-1. Cada método recebe apenas o histórico inicial e prevê a semana de validação.
-   O menor MAE de validação escolhe o método para a previsão futura.
-2. Em empates numéricos (diferença de até `1e-9` unidade/dia), é mantido o método
-   mais simples, na ordem da tabela. Uma referência simples também pode vencer.
-3. Para medir o erro de teste, cada método recebe o histórico anterior à última
-   semana, incluindo a validação. O resultado de teste **não troca o vencedor**,
-   mesmo quando outro método apresenta um erro menor nessa semana.
-4. O método escolhido recebe todo o histórico disponível para produzir a previsão
-   dos próximos sete dias. Essa previsão futura ainda não tem valores reais para
-   medir seu erro.
+Faixas são empíricas por ponto, não garantia de 90% de cobertura futura ou conjunta
+de toda a trajetória. Vendas observadas não revelam demanda perdida em rupturas.
+Promoções e preços podem estar associados a vendas sem demonstrar efeito causal.
 
-Com o mínimo de 30 dias, o ajuste da validação usa somente os primeiros 16 dias.
-Uma semana de validação e uma de teste permitem uma comparação inicial, mas
-podem não representar outros períodos. Mais histórico e várias janelas de
-avaliação são necessários antes de concluir qual método é mais confiável.
+## Banco local e histórico
 
-Os métodos não consideram promoções, preços, feriados nem falta de estoque.
-Vendas registradas não revelam demanda perdida por ruptura. Os valores previstos
-podem ter casas decimais; são estimativas, não garantia de vendas. Dados fictícios
-não demonstram eficácia em empresas.
-
-## Arquivos e testes
-
-| Arquivo | Função |
-| --- | --- |
-| `app.py` | Leitura do CSV, métodos de previsão, comparação e interface |
-| `vendas_exemplo.csv` | Dados fictícios para experimentar |
-| `requirements.txt` | Dependências |
-| `test_app.py` | Testes de entrada, padrões semanais, separação temporal e interface |
-
-Os testes usam `unittest`, incluído no Python. No Windows:
+O padrão é `data/stockmind.sqlite3`, ignorado pelo Git. Dashboard e API compartilham
+esse caminho; use a mesma variável para escolher outro arquivo:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest -v
+$env:STOCKMIND_DB = "C:\caminho\privado\stockmind.sqlite3"
 ```
 
-Incluem casos em que mudar as vendas da semana de teste não muda a escolha do
-método, e em que os métodos simples vencem. Também verificam o carregamento da
-tabela de comparação e o modo de envio de CSV.
+Vendas realizadas são atualizadas por SKU/data. Correções não alteram as previsões
+nem as entradas de análises já salvas. Datas sem realização continuam desconhecidas
+e não entram nas métricas como zero. O cadastro salvo inclui a data do estoque;
+reutilizá-lo com outra data de referência é bloqueado para evitar estoque antigo.
+O SQLite é local, transacional e adequado a este estágio; não há sincronização ERP.
 
-## Próximo passo
+## API
 
-Experimentar com um histórico real de um único produto, com origem e autorização
-conhecidas, e comparar mais janelas temporais antes de acrescentar controle de estoque.
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+Documentação interativa: `http://127.0.0.1:8000/docs`.
+
+[Rotas, exemplos e acompanhamento de previsões pela API](docs/api.md).
+A variável opcional `STOCKMIND_API_KEY` exige `X-API-Key` nas rotas de negócio.
+Sem ela, a API local não exige chave. Essa configuração **não protege o dashboard
+Streamlit**; ambos devem ser usados localmente nesta entrega. Nenhum serviço foi
+publicado. Uma hospedagem exige tratar autenticação do dashboard e infraestrutura.
+
+## Testes e desenvolvimento
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m unittest discover -v
+```
+
+CI executa a suíte com Python 3.12 no Linux e Windows. Os testes cobrem isolamento
+temporal, calibração, histórico curto, contexto, lotes, recebimentos, validação,
+rollback, snapshots, API e fluxos do dashboard.
+
+```text
+app.py                  dashboard
+api.py                  FastAPI e autenticação opcional por chave
+stockmind/data.py       importação e relatório de qualidade
+stockmind/forecasting.py modelos, janelas temporais e faixas
+stockmind/inventory.py   saldo e reposição
+stockmind/service.py     fluxo compartilhado, sem persistência implícita
+stockmind/storage.py     SQLite e acompanhamento de realizações
+```
+
+Os CSVs fictícios podem ser regenerados com `python scripts/generate_examples.py`
+(semente 42, sem dados externos). O projeto ainda precisa de avaliação com dados
+reais de origem e autorização conhecidas; não apresenta resultados comerciais medidos.

@@ -5,3 +5,10 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 vendas_privadas.csv
+data/*.sqlite3
+data/*.sqlite3-*
+*.db
+*.db-shm
+*.db-wal
+data/private/
+data/requisicao_exemplo.json
