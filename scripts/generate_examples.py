@@ -4,6 +4,7 @@ from pathlib import Path
 from random import Random
 import csv
 from datetime import date, timedelta
+import math
 
 ROOT = Path(__file__).resolve().parents[1] / "data"
 
@@ -42,6 +43,12 @@ def generate():
                     round(price * (0.9 if promotion else 1), 2),
                     promotion,
                     holiday,
+                    int(
+                        not (
+                            (sku == "CAF-001" and i in (100, 101))
+                            or (sku == "CAC-003" and i == length - 5)
+                        )
+                    ),
                 ]
             )
         for i in range(1, 91):
@@ -58,7 +65,7 @@ def generate():
             )
     write(
         "vendas_multiplos_exemplo.csv",
-        ["sku", "data", "vendas", "preco", "promocao", "feriado"],
+        ["sku", "data", "vendas", "preco", "promocao", "feriado", "disponivel"],
         sales,
     )
     write(
@@ -102,6 +109,46 @@ def generate():
             ["PED-03", "CAF-001", 100, (end + timedelta(days=45)).isoformat()],
         ],
     )
+    entregas = []
+    for fornecedor, previsto, prazos in [
+        ("FOR-01", 5, [4, 5, 6, 7, 6, 5, 7, 8, 6, 5, 7, 8]),
+        ("FOR-02", 10, [8, 9, 11, 10, 12, 9, 11, 12, 10, 12, 9, 11]),
+    ]:
+        for i, prazo in enumerate(prazos):
+            compra = end - timedelta(days=180 - i * 12)
+            entregas.append(
+                [
+                    f"ENT-{fornecedor}-{i + 1:02d}",
+                    fornecedor,
+                    compra.isoformat(),
+                    (compra + timedelta(days=previsto)).isoformat(),
+                    (compra + timedelta(days=prazo)).isoformat(),
+                ]
+            )
+    write(
+        "entregas_exemplo.csv",
+        [
+            "entrega_id",
+            "fornecedor_id",
+            "data_pedido",
+            "data_prevista",
+            "data_recebida",
+        ],
+        entregas,
+    )
+    anual = []
+    seasonal_rng = Random(73)
+    for i in range(1100):
+        dia = end - timedelta(days=1099 - i)
+        valor = (
+            70
+            + 25 * math.sin(2 * math.pi * dia.timetuple().tm_yday / 365.25)
+            + 10 * math.cos(2 * math.pi * (dia.day - 1) / 31)
+            + (5 if dia.weekday() == 5 else 0)
+            + seasonal_rng.randint(-2, 2)
+        )
+        anual.append(["SAZ-001", dia.isoformat(), max(0, round(valor)), 1])
+    write("vendas_sazonais_exemplo.csv", ["sku", "data", "vendas", "disponivel"], anual)
 
 
 if __name__ == "__main__":

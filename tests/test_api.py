@@ -111,6 +111,14 @@ class TestAPI(unittest.TestCase):
                 "revisao_dias": 7,
                 "comparar_horizontes": False,
                 "variacao_cenario_pct": 20.0,
+                "seguranca_automatica": False,
+                "ajustar_prazos": False,
+                "avaliar_reposicao": False,
+                "assumir_vendas_como_demanda": False,
+                "periodo_simulacao": 30,
+                "custo_falta_unitario": 1.0,
+                "custo_estoque_unitario_dia": 0.01,
+                "custo_pedido": 1.0,
             },
         )
         self.assertEqual(len(snapshot["resultado"]["previsoes"]), 7)
@@ -266,6 +274,7 @@ class TestAPI(unittest.TestCase):
             self.assertEqual(client.get("/health").status_code, 200)
             self.assertTrue(client.get("/health").json()["autenticacao_configurada"])
             self.assertEqual(client.get("/analises").status_code, 401)
+            self.assertEqual(client.get("/monitoramento").status_code, 401)
             self.assertEqual(
                 client.post("/analises", json={"vendas": self.sales}).status_code, 401
             )
@@ -353,6 +362,185 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         self.assertEqual(len(response.json()["resultado"]["previsoes"]), 7)
         self.assertTrue(response.json()["resultado"]["metricas"])
+
+    def test_new_policy_flags_receipts_and_manual_catalog_are_preserved(self):
+        products = [
+            {
+                "sku": "001",
+                "nome": "Produto",
+                "fornecedor_id": "F1",
+                "estoque_atual": 10,
+                "estoque_seguranca": 2,
+                "pedido_minimo": 3,
+                "multiplo_compra": 3,
+            }
+        ]
+        suppliers = [{"fornecedor_id": "F1", "nome": "Fornecedor", "prazo_dias": 2}]
+        receipts = [
+            {
+                "entrega_id": "0001",
+                "fornecedor_id": "F1",
+                "data_pedido": "2025-12-01",
+                "data_prevista": "2025-12-04",
+                "data_recebida": "2025-12-05",
+            }
+        ]
+        flags = {
+            "seguranca_automatica": True,
+            "ajustar_prazos": True,
+            "avaliar_reposicao": True,
+            "assumir_vendas_como_demanda": True,
+            "periodo_simulacao": 14,
+            "custo_falta_unitario": 5,
+            "custo_estoque_unitario_dia": 0.2,
+            "custo_pedido": 3,
+        }
+
+        def automatic_analysis(sales, **kwargs):
+            kwargs["produtos"].loc[0, "estoque_seguranca"] = 99
+            kwargs["fornecedores"].loc[0, "prazo_dias"] = 10
+            result = fixture_analysis(sales, **kwargs)
+            result["produtos_planejados"] = kwargs["produtos"].to_dict("records")
+            return result
+
+        with patch("api.executar_analise", side_effect=automatic_analysis) as analyse:
+            response = self.client.post(
+                "/analises",
+                json={
+                    "vendas": self.sales,
+                    "produtos": products,
+                    "fornecedores": suppliers,
+                    "pedidos": [],
+                    "entregas": receipts,
+                    **flags,
+                },
+            )
+        self.assertEqual(response.status_code, 201, response.text)
+        for key, expected in flags.items():
+            self.assertEqual(analyse.call_args.kwargs[key], expected)
+        self.assertEqual(
+            analyse.call_args.kwargs["entregas"].iloc[0]["entrega_id"], "0001"
+        )
+        snapshot = self.client.get(f"/analises/{response.json()['id']}").json()
+        self.assertEqual(snapshot["entrada"]["vendas"], self.sales)
+        self.assertEqual(snapshot["entrada"]["entregas"], receipts)
+        self.assertEqual(snapshot["entrada"]["produtos"][0]["estoque_seguranca"], 2)
+        self.assertEqual(snapshot["entrada"]["fornecedores"][0]["prazo_dias"], 2)
+        self.assertEqual(
+            snapshot["resultado"]["produtos_planejados"][0]["estoque_seguranca"], 99
+        )
+        self.assertEqual(
+            self.client.get("/planejamento").json()["produtos"][0]["estoque_seguranca"],
+            2,
+        )
+        for key, expected in flags.items():
+            self.assertEqual(snapshot["entrada"]["parametros"][key], expected)
+
+    @patch("api.executar_analise", side_effect=fixture_analysis)
+    def test_new_policy_inputs_reject_invalid_types_costs_and_future_receipts(
+        self, analyse
+    ):
+        invalid = (
+            [
+                {key: value}
+                for key in (
+                    "seguranca_automatica",
+                    "ajustar_prazos",
+                    "avaliar_reposicao",
+                    "assumir_vendas_como_demanda",
+                )
+                for value in (1, "true", None)
+            ]
+            + [
+                {key: value}
+                for key in (
+                    "custo_falta_unitario",
+                    "custo_estoque_unitario_dia",
+                    "custo_pedido",
+                )
+                for value in (-1, True, "1", float("inf"), float("nan"))
+            ]
+            + [{"periodo_simulacao": 1}, {"periodo_simulacao": True}]
+        )
+        for extra in invalid:
+            with self.subTest(extra=extra):
+                response = self.client.post(
+                    "/analises",
+                    content=json.dumps({"vendas": self.sales, **extra}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+        future_receipt = [
+            {
+                "entrega_id": "E1",
+                "fornecedor_id": "F1",
+                "data_pedido": "2026-01-01",
+                "data_prevista": "2026-01-04",
+                "data_recebida": "2026-01-03",
+            }
+        ]
+        response = self.client.post(
+            "/analises", json={"vendas": self.sales, "entregas": future_receipt}
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        analyse.assert_not_called()
+        self.assertEqual(self.client.get("/analises").json(), [])
+
+    @patch("api.executar_analise", side_effect=fixture_analysis)
+    def test_monitoring_is_readonly_and_validates_query_ranges(self, _analyse):
+        response = self.client.post("/analises", json={"vendas": self.sales})
+        run_id = response.json()["id"]
+        snapshot = self.client.get(f"/analises/{run_id}").json()
+        self.client.post(
+            "/vendas",
+            json={
+                "vendas": [
+                    {"sku": "001", "data": "2026-01-03", "vendas": 4, "disponivel": 0}
+                ]
+            },
+        )
+        response = self.client.get("/monitoramento?horizonte=7")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()[0]["periodos_retrospectivos"], 7)
+        self.assertFalse(response.json()[0]["alerta"])
+        for query in (
+            "horizonte=8",
+            "janela_recente=0",
+            "janela_base=366",
+            "limiar_aumento_pct=NaN",
+            "limiar_aumento_pct=-1",
+            "janela_base=true",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.client.get(f"/monitoramento?{query}").status_code, 422
+                )
+        self.assertEqual(len(self.client.get("/analises").json()), 1)
+        self.assertEqual(self.client.get(f"/analises/{run_id}").json(), snapshot)
+
+    def test_all_censored_analysis_is_saved_with_no_false_zero_forecast(self):
+        sales = [
+            {
+                "sku": "001",
+                "data": (date(2026, 1, 1) + timedelta(days=i)).isoformat(),
+                "vendas": 0,
+                "disponivel": 0,
+            }
+            for i in range(40)
+        ]
+        response = self.client.post("/analises", json={"vendas": sales})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["resultado"]["previsoes"], [])
+        self.assertEqual(
+            response.json()["resultado"]["metricas"][0]["status"],
+            "demanda_indisponivel",
+        )
+        run_id = response.json()["id"]
+        saved = self.client.get(f"/analises/{run_id}").json()
+        self.assertEqual(saved["entrada"]["vendas"], sales)
+        self.assertEqual(
+            self.client.get(f"/analises/{run_id}/comparacao").json()["resumo"], []
+        )
 
 
 if __name__ == "__main__":

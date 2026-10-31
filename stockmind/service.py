@@ -12,13 +12,17 @@ from stockmind.data import (
     validar_contexto_futuro,
     validar_planejamento,
     validar_vendas,
+    validar_entregas,
 )
 from stockmind.forecasting import (
     analisar_previsoes,
     comparar_horizontes as avaliar_horizontes,
+    coletar_erros_reposicao,
 )
 from stockmind.inventory import planejar_estoque
 from stockmind.scenarios import simular_cenarios
+from stockmind.analytics import classificar_produtos, analisar_prazos, sugerir_seguranca
+from stockmind.evaluation import avaliar_politicas
 
 
 def registros(frame):
@@ -42,6 +46,15 @@ def executar_analise(
     revisao_dias=7,
     comparar_horizontes=False,
     variacao_cenario_pct=20.0,
+    entregas=None,
+    seguranca_automatica=False,
+    ajustar_prazos=False,
+    avaliar_reposicao=False,
+    assumir_vendas_como_demanda=False,
+    periodo_simulacao=30,
+    custo_falta_unitario=1.0,
+    custo_estoque_unitario_dia=0.01,
+    custo_pedido=1.0,
 ):
     """Valida, prevê, compara métodos e calcula o estoque; não realiza compras."""
     if isinstance(horizonte, bool) or horizonte not in (7, 14, 30, 90):
@@ -54,6 +67,28 @@ def executar_analise(
         raise ValueError("Revisão do estoque deve ser entre 1 e 30 dias.")
     if not isinstance(comparar_horizontes, bool):
         raise ValueError("comparar_horizontes deve ser booleano.")
+    for nome, valor in {
+        "seguranca_automatica": seguranca_automatica,
+        "ajustar_prazos": ajustar_prazos,
+        "avaliar_reposicao": avaliar_reposicao,
+        "assumir_vendas_como_demanda": assumir_vendas_como_demanda,
+    }.items():
+        if not isinstance(valor, bool):
+            raise ValueError(f"{nome} deve ser booleano.")
+    if isinstance(periodo_simulacao, bool) or periodo_simulacao not in (7, 14, 30):
+        raise ValueError("Período da simulação deve ser 7, 14 ou 30 dias.")
+    for nome, valor in {
+        "custo_falta_unitario": custo_falta_unitario,
+        "custo_estoque_unitario_dia": custo_estoque_unitario_dia,
+        "custo_pedido": custo_pedido,
+    }.items():
+        if (
+            isinstance(valor, bool)
+            or not isinstance(valor, Real)
+            or not math.isfinite(valor)
+            or valor < 0
+        ):
+            raise ValueError(f"{nome} deve ser um número finito não negativo.")
     if (
         isinstance(variacao_cenario_pct, bool)
         or not isinstance(variacao_cenario_pct, Real)
@@ -89,6 +124,12 @@ def executar_analise(
         )
 
     usar_estoque = any(valor is not None for valor in (produtos, fornecedores, pedidos))
+    if not usar_estoque and (
+        seguranca_automatica or ajustar_prazos or avaliar_reposicao
+    ):
+        raise ValueError(
+            "Para ajustar segurança/prazos ou simular reposição, informe produtos e fornecedores."
+        )
     if usar_estoque:
         if produtos is None or fornecedores is None:
             raise ValueError(
@@ -121,13 +162,50 @@ def executar_analise(
                 ignore_index=True,
             )
 
+    classificacao = classificar_produtos(vendas)
+    entregas = validar_entregas(
+        entregas, origem, fornecedores if usar_estoque else None
+    )
+    produtos_manuais = produtos.copy() if usar_estoque else None
+    fornecedores_manuais = fornecedores.copy() if usar_estoque else None
+    prazos, seguranca, erros_reposicao = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if usar_estoque:
+        prazos = analisar_prazos(entregas, fornecedores, origem)
+        prazos["aplicado"] = False
+        fornecedores = fornecedores.copy()
+        produtos = produtos.copy()
+        if ajustar_prazos:
+            for i, estimativa in prazos.iterrows():
+                if pd.notna(estimativa["prazo_sugerido"]):
+                    fornecedores.loc[
+                        fornecedores["fornecedor_id"].eq(estimativa["fornecedor_id"]),
+                        "prazo_dias",
+                    ] = int(estimativa["prazo_sugerido"])
+                    prazos.loc[i, "aplicado"] = True
+
     previsoes, metricas = analisar_previsoes(vendas, horizonte, contexto)
     comparacao = (
         avaliar_horizontes(vendas, contexto) if comparar_horizontes else pd.DataFrame()
     )
     saldos, recomendacoes = pd.DataFrame(), pd.DataFrame()
     cenarios, saldos_cenarios = pd.DataFrame(), pd.DataFrame()
+    avaliacao_politicas, diario_politicas = pd.DataFrame(), pd.DataFrame()
     if usar_estoque:
+        mapa_prazos = fornecedores.set_index("fornecedor_id")["prazo_dias"]
+        prazos_sku = {
+            row["sku"]: int(mapa_prazos.loc[row["fornecedor_id"]])
+            for row in produtos.to_dict("records")
+        }
+        erros_reposicao = coletar_erros_reposicao(vendas, metricas, prazos_sku)
+        seguranca = sugerir_seguranca(produtos, erros_reposicao)
+        seguranca["aplicado"] = False
+        if seguranca_automatica:
+            for i, estimativa in seguranca.iterrows():
+                if pd.notna(estimativa["seguranca_sugerida"]):
+                    produtos.loc[
+                        produtos["sku"].eq(estimativa["sku"]), "estoque_seguranca"
+                    ] = int(estimativa["seguranca_sugerida"])
+                    seguranca.loc[i, "aplicado"] = True
         saldos, recomendacoes = planejar_estoque(
             previsoes, produtos, fornecedores, pedidos, revisao_dias
         )
@@ -139,12 +217,45 @@ def executar_analise(
             revisao_dias,
             variacao_cenario_pct,
         )
+        indisponiveis = set(
+            metricas.loc[metricas["status"].eq("demanda_indisponivel"), "sku"]
+        )
+        for frame in (recomendacoes, cenarios):
+            censuradas = frame["sku"].isin(indisponiveis)
+            frame.loc[censuradas, "status_previsao"] = "demanda_indisponivel"
+            frame.loc[censuradas, "motivos_alerta"] = (
+                "Todos os dias do histórico têm indisponibilidade; não há demanda observável para prever."
+            )
+        if avaliar_reposicao:
+            # Os parâmetros originais são cenários declarados, não estimativas
+            # aprendidas com o próprio período histórico que será avaliado.
+            avaliacao_politicas, diario_politicas = avaliar_politicas(
+                vendas,
+                produtos_manuais,
+                fornecedores_manuais,
+                periodo_dias=periodo_simulacao,
+                revisao_dias=revisao_dias,
+                assumir_vendas_como_demanda=assumir_vendas_como_demanda,
+                custo_falta_unitario=custo_falta_unitario,
+                custo_estoque_unitario_dia=custo_estoque_unitario_dia,
+                custo_pedido=custo_pedido,
+            )
     return {
         "origem": origem.date().isoformat(),
         "horizonte": horizonte,
         "revisao_dias": revisao_dias,
         "comparar_horizontes": comparar_horizontes,
         "variacao_cenario_pct": float(variacao_cenario_pct),
+        "seguranca_automatica": seguranca_automatica,
+        "ajustar_prazos": ajustar_prazos,
+        "avaliar_reposicao": avaliar_reposicao,
+        "assumir_vendas_como_demanda": assumir_vendas_como_demanda,
+        "periodo_simulacao": periodo_simulacao,
+        "custos_simulacao": {
+            "falta_unitaria": float(custo_falta_unitario),
+            "estoque_unitario_dia": float(custo_estoque_unitario_dia),
+            "pedido": float(custo_pedido),
+        },
         "previsoes": registros(previsoes),
         "metricas": registros(metricas),
         "saldos": registros(saldos),
@@ -153,4 +264,12 @@ def executar_analise(
         "comparacao_horizontes": registros(comparacao),
         "cenarios": registros(cenarios),
         "saldos_cenarios": registros(saldos_cenarios),
+        "classificacao_produtos": registros(classificacao),
+        "prazos_fornecedores": registros(prazos),
+        "seguranca_estoque": registros(seguranca),
+        "residuos_reposicao": registros(erros_reposicao),
+        "avaliacao_reposicao": registros(avaliacao_politicas),
+        "diario_reposicao": registros(diario_politicas),
+        "produtos_planejados": registros(produtos) if usar_estoque else [],
+        "fornecedores_planejados": registros(fornecedores) if usar_estoque else [],
     }

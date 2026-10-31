@@ -19,6 +19,7 @@ from stockmind.data import (
 )
 from stockmind.service import executar_analise
 from stockmind.storage import Store
+from stockmind.monitoring import monitorar_desempenho
 
 ROOT = Path(__file__).resolve().parent
 EXAMPLES = ROOT / "data"
@@ -64,7 +65,7 @@ LABELS = {
     "quantidade_compra_na_data": "Quantidade na data sugerida",
     "primeira_abaixo_seguranca": "Primeiro saldo abaixo da segurança",
     "dias_ate_falta": "Dias até a falta",
-    "dias_ate_seguranca": "Dias até atingir a segurança",
+    "dias_ate_seguranca": "Dias até ficar abaixo da segurança",
     "prioridade": "Prioridade",
     "motivos_alerta": "Motivo da revisão",
     "unidades_acima_alvo_30dias": "Unidades acima do alvo de 30 dias",
@@ -74,6 +75,40 @@ LABELS = {
     "mae_teste_semana_anterior": "MAE teste: referência semanal",
     "ganho_mae_teste_pct": "Redução do MAE vs. semana anterior (%)",
     "horizonte_necessario_agendamento": "Dias necessários para dimensionar compra futura",
+    "classe_abc": "Classe ABC",
+    "classe_xyz": "Classe XYZ",
+    "base_abc": "Base da classificação ABC",
+    "seguranca_manual": "Segurança manual",
+    "seguranca_sugerida": "Segurança sugerida",
+    "prazo_manual": "Prazo manual",
+    "prazo_sugerido": "Prazo sugerido",
+    "amostras": "Amostras",
+    "aplicado": "Aplicado nesta análise",
+    "participacao_pct": "Participação (%)",
+    "acumulado_pct": "Acumulado (%)",
+    "observacoes": "Observações",
+    "prazo_medio": "Prazo médio (dias)",
+    "prazo_desvio": "Desvio do prazo (dias)",
+    "prazo_p90": "Percentil 90 do prazo",
+    "atrasos_pct": "Entregas atrasadas (%)",
+    "amostras_disponiveis": "Amostras disponíveis",
+    "amostras_teste": "Dias avaliados no teste",
+    "dias_censurados": "Dias com indisponibilidade",
+    "dias_disponiveis": "Dias com vendas elegíveis",
+    "direcao_vies": "Direção do viés médio",
+    "perde_referencia_semanal": "Erro maior que a referência semanal",
+    "motivos_monitoramento": "Motivos do alerta",
+    "politica": "Política",
+    "vendas_perdidas": "Unidades não atendidas na simulação",
+    "estoque_medio": "Estoque médio simulado",
+    "custo_total_estimado": "Custo estimado do cenário",
+    "mae_recente": "MAE recente",
+    "mae_base": "MAE anterior",
+    "mae_referencia_recente": "MAE da referência semanal",
+    "vies_recente": "Viés recente",
+    "aumento_pct": "Aumento do MAE (%)",
+    "periodos_censurados": "Dias censurados excluídos",
+    "periodos_retrospectivos": "Dias com previsões retrospectivas excluídos",
 }
 SITUATIONS = {
     "critica": "Crítica",
@@ -90,9 +125,11 @@ SITUATIONS = {
     "revisar_compra": "Revisar compra",
     "acompanhar": "Acompanhar",
     "horizonte_insuficiente": "Aumente o horizonte",
-    "sem_previsao": "Sem histórico de vendas",
+    "sem_previsao": "Sem previsão disponível",
     "historico_curto": "Histórico curto: estimativa inicial",
     "avaliado": "Avaliado no histórico",
+    "avaliacao_parcial": "Avaliação limitada aos dias observáveis",
+    "demanda_indisponivel": "Sem demanda observável",
 }
 
 
@@ -115,7 +152,7 @@ def tabela(frame, columns=None):
                     else v
                 )
             )
-    st.dataframe(view.rename(columns=LABELS), hide_index=True, use_container_width=True)
+    st.dataframe(view.rename(columns=LABELS), hide_index=True, width="stretch")
 
 
 def baixar(label, records, filename):
@@ -127,7 +164,9 @@ def precisam_revisao(recomendacoes):
     """Inclui compra futura por segurança mesmo sem falta física no horizonte."""
     return recomendacoes["prioridade"].isin(
         ["critica", "alta", "media", "indefinida"]
-    ) | recomendacoes["status_previsao"].eq("historico_curto")
+    ) | recomendacoes["status_previsao"].isin(
+        ["historico_curto", "avaliacao_parcial", "demanda_indisponivel"]
+    )
 
 
 def cadastros(vendas, origem, store, exemplo):
@@ -230,6 +269,7 @@ def calcular(
     revisao,
     comparar=False,
     variacao=20.0,
+    avancado=None,
 ):
     return executar_analise(
         vendas,
@@ -241,6 +281,7 @@ def calcular(
         revisao,
         comparar_horizontes=comparar,
         variacao_cenario_pct=variacao,
+        **(avancado or {}),
     )
 
 
@@ -312,10 +353,23 @@ def historico(store, vendas):
             "Salve uma análise para acompanhar as previsões quando novas vendas estiverem disponíveis."
         )
         return
+    with st.expander("Monitorar o desempenho recente"):
+        st.caption(
+            "Usa previsões gravadas antes do dia previsto, com realizações observadas. Dias censurados e previsões retrospectivas são excluídos; amostras pequenas não geram diagnóstico de piora."
+        )
+        h_monitor = st.selectbox("Horizonte para monitorar", [7, 14, 30, 90])
+        if st.button("Verificar desempenho recente"):
+            desempenho = monitorar_desempenho(store, horizonte=h_monitor)
+            if desempenho.empty:
+                st.info(
+                    "Ainda não há previsões e realizações elegíveis para monitorar."
+                )
+            else:
+                tabela(desempenho)
     labels = {
         run[
             "id"
-        ]: f"{run['criado_em']} · origem {run['origem']} · {run['horizonte']} dias"
+        ]: f"{pd.to_datetime(run['criado_em'], utc=True).tz_convert('America/Sao_Paulo'):%d/%m/%Y %H:%M} (Brasília) · origem {run['origem']} · {run['horizonte']} dias"
         for run in runs
     }
     selected = st.selectbox("Análise salva", list(labels), format_func=labels.get)
@@ -332,6 +386,88 @@ def historico(store, vendas):
         st.json(snapshot)
 
 
+def mostrar_previsoes(vendas, previsoes, metricas, resultado):
+    sku = st.selectbox("Produto", sorted(metricas["sku"].unique()))
+    selected = previsoes.loc[previsoes["sku"].eq(sku)]
+    if selected.empty:
+        st.warning(
+            "Não há demanda observável suficiente para gerar previsão deste produto. Vendas em dias de indisponibilidade não são tratadas como demanda zero."
+        )
+        tabela(metricas.loc[metricas["sku"].eq(sku)])
+        baixar(
+            "Baixar diagnóstico de demanda",
+            metricas.loc[metricas["sku"].eq(sku)].to_dict("records"),
+            "diagnostico_demanda.csv",
+        )
+        return
+    st.info(
+        f"Método: {selected['modelo'].iloc[0]}. {SITUATIONS.get(selected['status'].iloc[0], selected['status'].iloc[0])}"
+    )
+    if selected["status"].iloc[0] in ("historico_curto", "avaliacao_parcial"):
+        st.warning(
+            "Histórico curto ou demanda parcialmente observável. Confira as amostras avaliadas e revise as sugestões de compra deste produto."
+        )
+    if "observacao" in selected and selected["observacao"].iloc[0]:
+        st.caption(selected["observacao"].iloc[0])
+    grafico_previsao(vendas, previsoes, sku)
+    tabela(selected, ["data", "previsao", "limite_inferior", "limite_superior"])
+    st.subheader("Comparação temporal dos métodos")
+    tabela(
+        metricas.loc[metricas["sku"].eq(sku)],
+        [
+            "modelo",
+            "mae_validacao",
+            "mae_teste",
+            "wape_teste",
+            "vies_teste",
+            "janelas_validacao",
+            "selecionado",
+            "cobertura_teste",
+            "status",
+        ],
+    )
+    st.caption(
+        "MAE em unidades/dia; WAPE em %. Viés positivo indica previsão acima do realizado. A escolha usa apenas janelas anteriores ao teste final. Faixas de 90% são empíricas, calibradas em período separado; a cobertura observada não garante cobertura futura. Sem dados suficientes, a faixa fica vazia."
+    )
+    with st.expander("Períodos de avaliação e detalhes por método"):
+        tabela(metricas.loc[metricas["sku"].eq(sku)])
+    with st.expander("Produtos com maiores erros no teste"):
+        ranking = metricas.loc[metricas["selecionado"]].sort_values(
+            "mae_teste", ascending=False, na_position="last"
+        )
+        tabela(
+            ranking,
+            ["sku", "modelo", "mae_teste", "wape_teste", "vies_teste", "status"],
+        )
+    if resultado["comparacao_horizontes"]:
+        st.subheader("Qual método funciona melhor em cada horizonte?")
+        comparacao = pd.DataFrame(resultado["comparacao_horizontes"])
+        tabela(
+            comparacao.loc[comparacao["sku"].eq(sku)],
+            [
+                "horizonte",
+                "modelo",
+                "mae_validacao",
+                "mae_teste",
+                "mae_teste_semana_anterior",
+                "ganho_mae_teste_pct",
+                "wape_teste",
+                "janelas_validacao",
+                "status",
+            ],
+        )
+        st.caption(
+            "Redução positiva do MAE indica erro menor que repetir a semana anterior; negativa indica erro maior. O teste não escolhe o método. Os períodos de teste diferem entre horizontes; não interprete a tabela como comparação de precisão em datas idênticas."
+        )
+        baixar(
+            "Baixar comparação de horizontes",
+            resultado["comparacao_horizontes"],
+            "comparacao_horizontes.csv",
+        )
+    baixar("Baixar todas as previsões", resultado["previsoes"], "previsoes.csv")
+    baixar("Baixar métricas por produto", resultado["metricas"], "metricas.csv")
+
+
 def main():
     st.set_page_config(page_title="StockMind-AI", layout="wide")
     st.title("StockMind-AI")
@@ -340,7 +476,12 @@ def main():
     )
     origem = st.radio(
         "Histórico",
-        ["Carteira fictícia", "Exemplo de um produto", "Enviar CSV"],
+        [
+            "Carteira fictícia",
+            "Exemplo de um produto",
+            "Sazonalidade anual",
+            "Enviar CSV",
+        ],
         horizontal=True,
     )
     exemplo = origem == "Carteira fictícia"
@@ -371,9 +512,14 @@ def main():
                 "Exemplo original de um produto: CSV com data e vendas continua aceito."
             )
             bruto = ler_csv(ROOT / "vendas_exemplo.csv")
+        elif origem == "Sazonalidade anual":
+            st.info(
+                "Exemplo fictício com 1.100 dias para avaliar padrões mensais e anuais."
+            )
+            bruto = ler_csv(EXAMPLES / "vendas_sazonais_exemplo.csv")
         else:
             st.caption(
-                "CSV: sku, data, vendas. Campos opcionais: preco, promocao, feriado. Formato antigo data,vendas também aceito."
+                "CSV: sku, data, vendas. Opcionais: disponivel (0/1), preco, promocao, feriado. Disponível=1 exige disponibilidade durante todo o dia; 0 indica vendas censuradas."
             )
             arquivo = st.file_uploader("Histórico diário de vendas", type="csv")
             if arquivo is None:
@@ -417,6 +563,71 @@ def main():
             if produtos is not None
             else 20.0
         )
+        avancado = {}
+        if produtos is not None:
+            with st.expander(
+                "Segurança calculada, entregas históricas e avaliação da reposição"
+            ):
+                st.caption(
+                    "Estimativas só substituem valores manuais quando habilitadas e sustentadas por amostras suficientes."
+                )
+                if exemplo:
+                    entregas = ler_csv(EXAMPLES / "entregas_exemplo.csv")
+                    st.caption(
+                        "Histórico fictício de 24 entregas incluído na carteira."
+                    )
+                else:
+                    recibos = st.file_uploader("Histórico de entregas CSV", type="csv")
+                    entregas = ler_arquivo(recibos) if recibos is not None else None
+                seguranca_auto = st.checkbox(
+                    "Aplicar estoque de segurança calculado", value=False
+                )
+                prazos_auto = st.checkbox(
+                    "Aplicar prazo sugerido pelo histórico de entregas", value=False
+                )
+                simular = st.checkbox(
+                    "Avaliar políticas de reposição no histórico", value=False
+                )
+                avancado = {
+                    "entregas": entregas,
+                    "seguranca_automatica": seguranca_auto,
+                    "ajustar_prazos": prazos_auto,
+                    "avaliar_reposicao": simular,
+                }
+                if simular:
+                    st.info(
+                        "Replay com estoque inicial e parâmetros manuais do catálogo como cenário declarado. Não reconstrói o estoque real passado; custos abaixo são premissas em unidades monetárias."
+                    )
+                    periodo = st.selectbox(
+                        "Período histórico da simulação (dias)", [7, 14, 30], index=2
+                    )
+                    proxy = st.checkbox(
+                        "Assumir vendas como demanda quando a disponibilidade não foi informada",
+                        value=False,
+                    )
+                    perda = st.number_input(
+                        "Custo assumido por unidade não atendida",
+                        min_value=0.0,
+                        value=1.0,
+                    )
+                    manutencao = st.number_input(
+                        "Custo assumido por unidade em estoque por dia",
+                        min_value=0.0,
+                        value=0.01,
+                        step=0.01,
+                    )
+                    pedido_custo = st.number_input(
+                        "Custo assumido por pedido", min_value=0.0, value=1.0
+                    )
+                    avancado.update(
+                        {
+                            "periodo_simulacao": periodo,
+                            "assumir_vendas_como_demanda": proxy,
+                            "custo_falta_unitario": perda,
+                            "custo_estoque_unitario_dia": manutencao,
+                            "custo_pedido": pedido_custo,
+                        }
+                    )
         resultado = calcular(
             vendas,
             horizonte,
@@ -427,6 +638,7 @@ def main():
             revisao,
             comparar,
             variacao,
+            avancado,
         )
     except DataError as erro:
         st.error(str(erro))
@@ -441,7 +653,21 @@ def main():
         st.error(str(erro))
         st.stop()
 
-    previsoes = pd.DataFrame(resultado["previsoes"])
+    previsoes = (
+        pd.DataFrame(resultado["previsoes"])
+        if resultado["previsoes"]
+        else pd.DataFrame(
+            columns=[
+                "sku",
+                "data",
+                "previsao",
+                "limite_inferior",
+                "limite_superior",
+                "modelo",
+                "status",
+            ]
+        )
+    )
     metricas = pd.DataFrame(resultado["metricas"])
     saldos = pd.DataFrame(resultado["saldos"])
     recomendacoes = pd.DataFrame(resultado["recomendacoes"])
@@ -490,94 +716,38 @@ def main():
             resultado,
             vendas,
             contexto_futuro=future,
+            entregas=avancado.get("entregas"),
+            vendas_originais=bruto,
             parametros={
                 "horizonte": horizonte,
                 "revisao_dias": revisao,
                 "comparar_horizontes": comparar,
                 "variacao_cenario_pct": variacao,
+                **{key: value for key, value in avancado.items() if key != "entregas"},
             },
             **planning,
         )
         st.success(f"Análise salva: {run_id}")
 
-    stock_tab, forecasts_tab, scenarios_tab, quality_tab, history_tab = st.tabs(
+    (
+        stock_tab,
+        forecasts_tab,
+        scenarios_tab,
+        evaluation_tab,
+        quality_tab,
+        history_tab,
+    ) = st.tabs(
         [
             "Decisões de reposição",
             "Previsões",
             "Cenários de demanda",
+            "Avaliação da reposição",
             "Qualidade dos dados",
             "Histórico",
         ]
     )
     with forecasts_tab:
-        sku = st.selectbox("Produto", sorted(previsoes["sku"].unique()))
-        selected = previsoes.loc[previsoes["sku"].eq(sku)]
-        st.info(
-            f"Método: {selected['modelo'].iloc[0]}. {SITUATIONS.get(selected['status'].iloc[0], selected['status'].iloc[0])}"
-        )
-        if selected["status"].iloc[0] == "historico_curto":
-            st.warning(
-                "Estimativa inicial por histórico insuficiente. Qualquer sugestão de compra deste produto é provisória e precisa de revisão."
-            )
-        if "observacao" in selected and selected["observacao"].iloc[0]:
-            st.caption(selected["observacao"].iloc[0])
-        grafico_previsao(vendas, previsoes, sku)
-        tabela(selected, ["data", "previsao", "limite_inferior", "limite_superior"])
-        st.subheader("Comparação temporal dos métodos")
-        tabela(
-            metricas.loc[metricas["sku"].eq(sku)],
-            [
-                "modelo",
-                "mae_validacao",
-                "mae_teste",
-                "wape_teste",
-                "vies_teste",
-                "janelas_validacao",
-                "selecionado",
-                "cobertura_teste",
-                "status",
-            ],
-        )
-        st.caption(
-            "MAE em unidades/dia; WAPE em %. Viés positivo indica previsão acima do realizado. A escolha usa apenas janelas anteriores ao teste final. Faixas de 90% são empíricas, calibradas em período separado; a cobertura observada não garante cobertura futura. Sem dados suficientes, a faixa fica vazia."
-        )
-        with st.expander("Períodos de avaliação e detalhes por método"):
-            tabela(metricas.loc[metricas["sku"].eq(sku)])
-        with st.expander("Produtos com maiores erros no teste"):
-            ranking = metricas.loc[metricas["selecionado"]].sort_values(
-                "mae_teste", ascending=False, na_position="last"
-            )
-            tabela(
-                ranking,
-                ["sku", "modelo", "mae_teste", "wape_teste", "vies_teste", "status"],
-            )
-        if resultado["comparacao_horizontes"]:
-            st.subheader("Qual método funciona melhor em cada horizonte?")
-            comparacao = pd.DataFrame(resultado["comparacao_horizontes"])
-            tabela(
-                comparacao.loc[comparacao["sku"].eq(sku)],
-                [
-                    "horizonte",
-                    "modelo",
-                    "mae_validacao",
-                    "mae_teste",
-                    "mae_teste_semana_anterior",
-                    "ganho_mae_teste_pct",
-                    "wape_teste",
-                    "janelas_validacao",
-                    "status",
-                ],
-            )
-            st.caption(
-                "Redução positiva do MAE indica erro menor que repetir a semana anterior; negativa indica erro maior. O teste não escolhe o método. Os períodos de teste diferem entre horizontes; não interprete a tabela como comparação de precisão em datas idênticas."
-            )
-            baixar(
-                "Baixar comparação de horizontes",
-                resultado["comparacao_horizontes"],
-                "comparacao_horizontes.csv",
-            )
-        baixar("Baixar todas as previsões", resultado["previsoes"], "previsoes.csv")
-        baixar("Baixar métricas por produto", resultado["metricas"], "metricas.csv")
+        mostrar_previsoes(vendas, previsoes, metricas, resultado)
     with stock_tab:
         if recomendacoes.empty:
             st.info(
@@ -602,6 +772,11 @@ def main():
                 horizontal=True,
             )
             view = recomendacoes.copy()
+            classes = pd.DataFrame(resultado["classificacao_produtos"])
+            if not classes.empty:
+                view = view.merge(
+                    classes[["sku", "classe_abc", "classe_xyz"]], on="sku", how="left"
+                )
             if filtro:
                 view = view.loc[
                     view["sku"].str.contains(filtro, case=False, regex=False)
@@ -631,11 +806,12 @@ def main():
                     ["prioridade_ordem", "dias_ate_falta", "sku"], na_position="last"
                 )
             provisorios = view.loc[
-                view["status_previsao"].eq("historico_curto"), "sku"
+                view["status_previsao"].isin(["historico_curto", "avaliacao_parcial"]),
+                "sku",
             ].tolist()
             if provisorios:
                 st.warning(
-                    "Sugestões provisórias por histórico curto: "
+                    "Sugestões com histórico curto ou demanda parcialmente observável: "
                     + ", ".join(provisorios)
                 )
             colunas_decisao = [
@@ -653,6 +829,8 @@ def main():
                     "sku",
                     "nome",
                     "prioridade",
+                    "classe_abc",
+                    "classe_xyz",
                     "estoque_atual",
                     "unidades_acima_alvo_30dias",
                     "excesso",
@@ -677,6 +855,24 @@ def main():
                     "A data-limite deriva do primeiro saldo abaixo da segurança, descontando o prazo do fornecedor. O agendamento considera compra ao fechar o dia e prazo efetivo de pelo menos um dia. A quantidade cobre o maior déficit em relação à segurança após a entrega, na janela de proteção, aplicando mínimo e lote. Compras futuras usam uma janela deslocada; compra_sugerida representa comprar na data-base. Excesso compara posição com previsão de 30 dias + segurança."
                 )
                 tabela(recomendacoes)
+            with st.expander("Classificação, segurança e prazos utilizados"):
+                st.write(
+                    "ABC descreve o faturamento registrado, ou unidades quando faltam preços. XYZ exige dias confirmados disponíveis. As categorias não alteram a política automaticamente."
+                )
+                tabela(pd.DataFrame(resultado["classificacao_produtos"]))
+                st.write(
+                    "Segurança pelo quantil dos erros acumulados no prazo de reposição, em blocos de calibração sem sobreposição. Sem amostras suficientes, mantém-se o cadastro manual."
+                )
+                tabela(pd.DataFrame(resultado["seguranca_estoque"]))
+                st.write(
+                    "O prazo sugerido usa o percentil empírico das entregas históricas, sem garantia de prazo futuro. Estimativas fora dos limites ou com poucas amostras não são aplicadas."
+                )
+                tabela(pd.DataFrame(resultado["prazos_fornecedores"]))
+                baixar(
+                    "Baixar erros de calibração da reposição",
+                    resultado["residuos_reposicao"],
+                    "residuos_reposicao.csv",
+                )
             if not saldos.empty:
                 product_stock = st.selectbox(
                     "Produto para saldo diário", sorted(saldos["sku"].unique())
@@ -701,6 +897,21 @@ def main():
                 "reposicao.csv",
             )
             baixar("Baixar saldo projetado", resultado["saldos"], "saldos.csv")
+            baixar(
+                "Baixar classificação ABC/XYZ",
+                resultado["classificacao_produtos"],
+                "classificacao.csv",
+            )
+            baixar(
+                "Baixar segurança e amostras",
+                resultado["seguranca_estoque"],
+                "seguranca.csv",
+            )
+            baixar(
+                "Baixar análise dos fornecedores",
+                resultado["prazos_fornecedores"],
+                "prazos.csv",
+            )
     with scenarios_tab:
         st.subheader("Como uma demanda diferente muda a reposição?")
         st.caption(
@@ -751,6 +962,32 @@ def main():
                 "Baixar saldos dos cenários",
                 resultado["saldos_cenarios"],
                 "saldos_cenarios.csv",
+            )
+    with evaluation_tab:
+        st.subheader("Como as políticas se comportam no histórico?")
+        if not resultado["avaliacao_reposicao"]:
+            st.info(
+                "Ative Avaliar políticas de reposição no histórico nas opções de planejamento."
+            )
+        else:
+            st.caption(
+                "Cenário retrospectivo com parâmetros manuais fixos, mesmos custos e estoque inicial para todas as políticas. Estimativas automáticas desta análise não são usadas no replay. Vendas censuradas bloqueiam a avaliação."
+            )
+            tabela(pd.DataFrame(resultado["avaliacao_reposicao"]))
+            st.write(
+                f"Período: {resultado['periodo_simulacao']} dias. Custos assumidos: {resultado['custos_simulacao']}. Valores são custos de cenário, sem evidência de economia ou ROI comercial."
+            )
+            with st.expander("Diário de estoque, atendimento e pedidos simulados"):
+                tabela(pd.DataFrame(resultado["diario_reposicao"]))
+            baixar(
+                "Baixar avaliação das políticas",
+                resultado["avaliacao_reposicao"],
+                "avaliacao_reposicao.csv",
+            )
+            baixar(
+                "Baixar diário da simulação",
+                resultado["diario_reposicao"],
+                "diario_reposicao.csv",
             )
     with quality_tab:
         st.subheader("Relatório de importação")

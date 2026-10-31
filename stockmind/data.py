@@ -21,6 +21,14 @@ PRODUCT_COLUMNS = [
 ]
 SUPPLIER_COLUMNS = ["fornecedor_id", "nome", "prazo_dias"]
 ORDER_COLUMNS = ["pedido_id", "sku", "quantidade", "data_entrega"]
+RECEIPT_COLUMNS = [
+    "entrega_id",
+    "fornecedor_id",
+    "data_pedido",
+    "data_prevista",
+    "data_recebida",
+]
+MAX_RECEIPT_LEAD_DAYS = 365
 MAX_SAFE_INTEGER = 2**53 - 1
 
 
@@ -76,7 +84,12 @@ def ler_csv(arquivo):
     try:
         return pd.read_csv(
             arquivo,
-            dtype={"sku": str, "fornecedor_id": str, "pedido_id": str},
+            dtype={
+                "sku": str,
+                "fornecedor_id": str,
+                "pedido_id": str,
+                "entrega_id": str,
+            },
             keep_default_na=False,
         )
     except (ValueError, UnicodeError, OSError) as exc:
@@ -211,9 +224,15 @@ def _normalize_sales(raw):
         if "sku" not in raw.columns:
             raw["sku"] = "PRODUTO-001"
         supplied_context = [col for col in CONTEXT_COLUMNS if col in raw.columns]
+        supplied_availability = "disponivel" in raw.columns
     else:
         supplied_context = []
-    required = SALES_COLUMNS + supplied_context
+        supplied_availability = False
+    required = (
+        SALES_COLUMNS
+        + supplied_context
+        + (["disponivel"] if supplied_availability else [])
+    )
     frame = _frame(raw, required, issues, "vendas")
     if frame.empty:
         _issue(issues, "vendas", "O histórico de vendas está vazio.")
@@ -221,6 +240,8 @@ def _normalize_sales(raw):
     _ids(frame, "sku", issues)
     _dates(frame, "data", issues)
     _numbers(frame, "vendas", issues, integer=True)
+    if supplied_availability:
+        _numbers(frame, "disponivel", issues, integer=True, maximum=1)
     for col in supplied_context:
         _numbers(
             frame,
@@ -260,7 +281,27 @@ def _normalize_sales(raw):
                 sku,
                 nivel="aviso",
             )
-        units = group["vendas"].dropna()
+        if supplied_availability:
+            censored = int(group["disponivel"].eq(0).sum())
+            if censored:
+                _issue(
+                    issues,
+                    "disponivel",
+                    f"{sku}: {censored} dias com disponibilidade parcial ou ausente; vendas censuradas não medem a demanda perdida.",
+                    sku,
+                    nivel="aviso",
+                )
+            # Zeros em dias censurados não identificam demanda intermitente.
+            units = group.loc[group["disponivel"].eq(1), "vendas"].dropna()
+        else:
+            _issue(
+                issues,
+                "disponivel",
+                f"{sku}: disponibilidade histórica não informada; não é possível distinguir vendas baixas de vendas limitadas por falta de estoque.",
+                sku,
+                nivel="aviso",
+            )
+            units = group["vendas"].dropna()
         if len(units) and units.eq(0).all():
             _issue(
                 issues,
@@ -448,4 +489,91 @@ def validar_planejamento(produtos, fornecedores, pedidos, skus, origem):
         products.sort_values("sku").reset_index(drop=True),
         suppliers.sort_values("fornecedor_id").reset_index(drop=True),
         orders.sort_values(["data_entrega", "pedido_id"]).reset_index(drop=True),
+    )
+
+
+def validar_entregas(raw, origem, fornecedores=None):
+    """Valida recebimentos históricos conhecidos na data de referência.
+
+    Uma linha representa uma entrega identificada. Prazos prometidos e realizados
+    são limitados a 365 dias corridos a partir do pedido. Chegar antes do prometido
+    é válido. Uma entrega recebida após ``origem`` é rejeitada, sem aproveitar
+    informação que ainda não estava disponível naquela data.
+    """
+    issues = []
+    if raw is None:
+        return pd.DataFrame(columns=RECEIPT_COLUMNS)
+    if isinstance(raw, pd.DataFrame) and raw.empty and not len(raw.columns):
+        return pd.DataFrame(columns=RECEIPT_COLUMNS)
+    frame = _frame(raw, RECEIPT_COLUMNS, issues, "entregas históricas")
+    if frame.empty:
+        _fail(issues)
+        return frame[RECEIPT_COLUMNS].copy()
+
+    _ids(frame, "entrega_id", issues)
+    _ids(frame, "fornecedor_id", issues)
+    _duplicate(frame, ["entrega_id"], issues, "entregas históricas")
+    for column in ["data_pedido", "data_prevista", "data_recebida"]:
+        _dates(frame, column, issues)
+
+    origin = _date_value(origem)
+    if pd.isna(origin):
+        _issue(
+            issues, "origem", "Data de referência inválida para as entregas históricas."
+        )
+
+    known_suppliers = None
+    if fornecedores is not None:
+        if (
+            not isinstance(fornecedores, pd.DataFrame)
+            or "fornecedor_id" not in fornecedores
+        ):
+            _issue(
+                issues,
+                "fornecedor_id",
+                "Fornecedores devem informar a coluna fornecedor_id.",
+            )
+        else:
+            suppliers = fornecedores[["fornecedor_id"]].copy().reset_index(drop=True)
+            _ids(suppliers, "fornecedor_id", issues)
+            known_suppliers = set(suppliers["fornecedor_id"])
+
+    for i, row in enumerate(frame.itertuples(index=False), start=2):
+        label = f"Entrega {row.entrega_id}"
+        if known_suppliers is not None and row.fornecedor_id not in known_suppliers:
+            _issue(
+                issues,
+                "fornecedor_id",
+                f"{label}: fornecedor não cadastrado: {row.fornecedor_id}.",
+                linha=i,
+            )
+        if pd.notna(row.data_pedido):
+            for column in ["data_prevista", "data_recebida"]:
+                value = getattr(row, column)
+                if pd.isna(value):
+                    continue
+                lead = (value - row.data_pedido).days
+                if lead < 0 or lead > MAX_RECEIPT_LEAD_DAYS:
+                    _issue(
+                        issues,
+                        column,
+                        f"{label}: {column} deve ficar entre 0 e {MAX_RECEIPT_LEAD_DAYS} dias após o pedido.",
+                        linha=i,
+                    )
+        if (
+            pd.notna(row.data_recebida)
+            and pd.notna(origin)
+            and row.data_recebida > origin
+        ):
+            _issue(
+                issues,
+                "data_recebida",
+                f"{label}: recebimento após a data de referência não pode ser usado como histórico conhecido.",
+                linha=i,
+            )
+    _fail(issues)
+    return (
+        frame[RECEIPT_COLUMNS]
+        .sort_values(["fornecedor_id", "data_recebida", "entrega_id"])
+        .reset_index(drop=True)
     )

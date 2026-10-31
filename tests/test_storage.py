@@ -193,6 +193,151 @@ class TestStore(unittest.TestCase):
         self.assertEqual(planning["pedidos"][0]["data_entrega"], "2026-01-04")
         self.assertEqual(planning["produtos"][0]["sku"], "001")
 
+    def test_availability_excludes_censored_targets_and_preserves_unknown(self):
+        run_id = self.store.save_run(self.result, self.sales)
+        self.store.save_actuals(
+            [
+                {"sku": "001", "data": "2026-01-03", "vendas": 0, "disponivel": 0},
+                {"sku": "001", "data": "2026-01-04", "vendas": 20},
+            ]
+        )
+        comparison = self.store.compare_run(run_id)
+        summary = comparison["resumo"][0]
+        self.assertEqual(summary["periodos_observados"], 2)
+        self.assertEqual(summary["periodos_avaliados"], 1)
+        self.assertEqual(summary["periodos_censurados"], 1)
+        self.assertEqual(summary["periodos_disponibilidade_desconhecida"], 1)
+        self.assertEqual(summary["mae"], 0)
+        self.assertEqual(summary["cobertura_faixa"], 100)
+        self.assertIn("disponibilidade_desconhecida", summary["base_avaliacao"])
+        self.assertIsNone(comparison["comparacoes"][0]["erro"])
+        self.assertEqual(comparison["comparacoes"][0]["disponivel"], 0)
+        self.assertIsNone(comparison["comparacoes"][1]["disponivel"])
+        self.store.save_actuals([{"sku": "001", "data": "2026-01-03", "vendas": 5}])
+        self.assertEqual(
+            self.store.compare_run(run_id)["resumo"][0]["periodos_censurados"], 1
+        )
+        self.store.save_actuals(
+            [{"sku": "001", "data": "2026-01-03", "vendas": 0, "disponivel": 1}]
+        )
+        self.assertEqual(self.store.compare_run(run_id)["resumo"][0]["mae"], 5)
+
+    def test_old_database_migration_is_additive_idempotent_and_nullable(self):
+        path = Path(self.directory.name) / "old.sqlite3"
+        old_result = {
+            "previsoes": [{"sku": "001", "data": "2026-01-03", "previsao": 10}]
+        }
+        old_input = {"vendas": [{"sku": "001", "data": "2026-01-02", "vendas": 3}]}
+        import json
+
+        with sqlite3.connect(path) as connection:
+            connection.executescript("""
+                CREATE TABLE sales(sku TEXT NOT NULL, data TEXT NOT NULL, vendas INTEGER NOT NULL,
+                    preco REAL, promocao INTEGER, feriado INTEGER, atualizado_em TEXT NOT NULL,
+                    PRIMARY KEY(sku,data));
+                CREATE TABLE runs(id TEXT PRIMARY KEY, criado_em TEXT NOT NULL, origem TEXT NOT NULL,
+                    horizonte INTEGER NOT NULL, resultado_json TEXT NOT NULL, entrada_json TEXT NOT NULL);
+                CREATE TABLE forecasts(run_id TEXT NOT NULL,sku TEXT NOT NULL,data TEXT NOT NULL,
+                    previsao REAL NOT NULL,limite_inferior REAL,limite_superior REAL,modelo TEXT,
+                    PRIMARY KEY(run_id,sku,data));
+            """)
+            connection.execute(
+                "INSERT INTO sales VALUES ('001','2026-01-03',4,NULL,NULL,NULL,'2026-01-04')"
+            )
+            connection.execute(
+                "INSERT INTO runs VALUES (?,?,?,?,?,?)",
+                (
+                    "old",
+                    "2026-01-02T12:00:00+00:00",
+                    "2026-01-02",
+                    1,
+                    json.dumps(old_result),
+                    json.dumps(old_input),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO forecasts VALUES ('old','001','2026-01-03',10,NULL,NULL,'referencia')"
+            )
+        for _ in range(2):
+            store = Store(path)
+            self.assertEqual(store.get_run("old")["resultado"], old_result)
+            self.assertEqual(store.get_run("old")["entrada"], old_input)
+            original = store.compare_run("old")
+            self.assertIsNone(original["comparacoes"][0]["disponivel"])
+            self.assertEqual(original["resumo"][0]["mae"], 6)
+            store.save_actuals(
+                [{"sku": "002", "data": "2026-01-03", "vendas": 0, "disponivel": 0}]
+            )
+            store.close()
+        with sqlite3.connect(path) as connection:
+            fields = [row[1] for row in connection.execute("PRAGMA table_info(sales)")]
+            self.assertEqual(fields.count("disponivel"), 1)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT disponivel FROM sales WHERE sku='002'"
+                ).fetchone()[0],
+                0,
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE sales SET disponivel=2")
+
+    def test_raw_inputs_receipts_and_unknown_demand_snapshot(self):
+        raw = [{"sku": " 001 ", "data": "2026-01-02", "vendas": 3, "disponivel": 0}]
+        receipts = [
+            {
+                "entrega_id": "001",
+                "fornecedor_id": "F1",
+                "data_pedido": "2025-12-01",
+                "data_prevista": "2025-12-05",
+                "data_recebida": "2025-12-06",
+            }
+        ]
+        unknown = {
+            "previsoes": [],
+            "horizonte": 7,
+            "metricas": [
+                {"sku": "001", "status": "demanda_indisponivel", "mae_teste": None}
+            ],
+        }
+        run_id = self.store.save_run(
+            unknown, self.sales, vendas_originais=raw, entregas=receipts
+        )
+        saved = self.store.get_run(run_id)
+        self.assertEqual(saved["entrada"]["vendas"], raw)
+        self.assertEqual(saved["entrada"]["entregas"], receipts)
+        self.assertEqual(saved["resultado"], unknown)
+        self.assertEqual(self.store.list_runs()[0]["quantidade_previsoes"], 0)
+        self.assertEqual(self.store.compare_run(run_id)["comparacoes"], [])
+        with self.assertRaises(ValueError):
+            self.store.save_run(
+                {"previsoes": [], "horizonte": 7, "metricas": []}, self.sales
+            )
+        self.assertEqual(len(self.store.list_runs()), 1)
+
+    def test_invalid_availability_rolls_back_all_actuals(self):
+        run_id = self.store.save_run(self.result, self.sales)
+        for value in (2, -1, True, 0.5, float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.store.save_actuals(
+                    [
+                        {
+                            "sku": "001",
+                            "data": "2026-01-03",
+                            "vendas": 1,
+                            "disponivel": 1,
+                        },
+                        {
+                            "sku": "001",
+                            "data": "2026-01-04",
+                            "vendas": 2,
+                            "disponivel": value,
+                        },
+                    ]
+                )
+        self.assertEqual(
+            self.store.compare_run(run_id)["resumo"][0]["periodos_observados"], 0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

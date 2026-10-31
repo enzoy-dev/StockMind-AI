@@ -20,6 +20,10 @@ def main():
         "revisao_dias": 7,
         "comparar_horizontes": True,
         "variacao_cenario_pct": 20.0,
+        "seguranca_automatica": True,
+        "ajustar_prazos": True,
+        "avaliar_reposicao": True,
+        "periodo_simulacao": 30,
     }
     for key, filename in {
         "vendas": "vendas_multiplos_exemplo.csv",
@@ -27,6 +31,7 @@ def main():
         "produtos": "produtos_exemplo.csv",
         "fornecedores": "fornecedores_exemplo.csv",
         "pedidos": "pedidos_exemplo.csv",
+        "entregas": "entregas_exemplo.csv",
     }.items():
         frame = pd.read_csv(
             ROOT / "data" / filename,

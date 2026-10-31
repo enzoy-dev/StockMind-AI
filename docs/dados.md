@@ -7,12 +7,15 @@ Arquivos demonstrativos estão em [data](../data). Todos são fictícios.
 ## Vendas
 
 Obrigatórios: `sku,data,vendas`. O formato legado `data,vendas` recebe
-`sku=PRODUTO-001`. Opcionalmente, `preco,promocao,feriado`.
+`sku=PRODUTO-001`. Opcionalmente, `disponivel,preco,promocao,feriado`.
 
 - `vendas`: unidades inteiras não negativas, já agregadas por dia/produto.
 - `preco`: número finito não negativo. Não é usado para estimar faturamento futuro.
 - `promocao,feriado`: inteiros 0/1, conhecidos antes do período que se quer prever.
 - Booleanos JSON não substituem números; use 0/1 explicitamente.
+- `disponivel`: 1 para disponibilidade durante todo o dia; 0 para vendas censuradas
+  por indisponibilidade parcial/total. Quando existir, a coluna não admite ausências.
+  Sem a coluna, disponibilidade permanece desconhecida. Não se presume demanda zero.
 - Não há linhas duplicadas por SKU/data nem dias ausentes no intervalo de cadaSKU.
 - Produtos podem começar em datas diferentes, mas terminam na mesma data.
 - Catálogo sem vendas é permitido; não recebe demanda zero automaticamente.

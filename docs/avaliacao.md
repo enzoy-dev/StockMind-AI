@@ -14,10 +14,20 @@
   médias móveis de 7/14 dias e calendário. Atributos do treino usam apenas vendas
   anteriores ao alvo; na previsão de vários passos, os atrasos usam as previsões
   já geradas. Só participa se o primeiro treino de validação tiver pelo menos 42 dias.
+- Regressão com ciclo mensal: tendência/calendário e ciclo do dia do mês, com
+  pelo menos 90 observações de venda elegíveis em cada treino de validação.
+- Regressão com ciclo anual: calendário anual, com pelo menos 730 observações de venda elegíveis
+  em cada treino de validação. Esses limiares são critérios de elegibilidade,
+  não prova de que exista sazonalidade.
+- Gradient Boosting: 40 árvores, profundidade 2, folha mínima 5, taxa .05 e semente
+  42. Usa atributos de calendário conhecidos; exige pelo menos 60 alvos disponíveis
+  por treino de validação. Parâmetros fixos, sem escolha pelo erro de teste.
 - Regressão com contexto: tendência, indicadores, preço, promoção e feriado;
   padronização+Ridge (`alpha=1`) ajustados somente no histórico disponível de cada janela.
 
-Não há busca automática de hiperparâmetros. Valores negativos previstos são
+Observações elegíveis excluem as marcadas como censuradas. No formato legado sem
+disponibilidade, são vendas observadas com essa limitação explícita, não confirmação
+de demanda completa. Não há busca automática de hiperparâmetros. Valores negativos previstos são
 limitados a zero. Não se agregam vendas de produtos distintos para treinar.
 
 ## Separação temporal
@@ -40,6 +50,25 @@ métricas continuam sendo as previsões que foram calculadas sem esses valores.
 Se há menos de `14+2*h` dias, não existe validação+teste suficiente: usa-se média
 dos últimos até 14 dias, status de histórico curto, sem métricas/faixas inventadas.
 Produto sem nenhuma venda no catálogo fica sem previsão e compra sugerida.
+
+## Disponibilidade e fallback
+
+`disponivel=0` indica vendas censuradas: a quantidade registrada é preservada,
+mas não é usada como demanda em alvos de treinamento, validação, teste ou calibração.
+Regressões de calendário/contexto usam só alvos disponíveis, preservando suas datas.
+Métodos semanais, Croston e atrasos precisam de um sufixo contínuo disponível.
+
+A elegibilidade dos candidatos usa apenas prefixos da validação. Uma indisponibilidade
+posterior não pode mudar retroativamente o vencedor. Se ele não puder ser ajustado
+num bloco posterior, esse erro fica ausente; não se substitui uma previsão por
+fallback enquanto se atribui o resultado ao modelo original. Se o ajuste operacional
+for inviável, a média dos dias observáveis é identificada como fallback através de
+`modelo_validacao`/`modelo_operacional`, sem transferir a faixa do modelo anterior.
+
+Todos os dias censurados deixam o produto sem previsão, com `demanda_indisponivel`.
+A análise pode ser salva com zero pontos, preservando seu diagnóstico. Ausência da
+coluna não confirma disponibilidade: os resultados descrevem vendas observadas e
+registram essa limitação. Consulte [segurança e avaliação de políticas](confiabilidade.md).
 
 ## Faixas empíricas
 
@@ -66,51 +95,29 @@ segurança informada, sem afirmar otimização probabilística.
 Não se publica uma “precisão geral da IA”. Produtos de volumes distintos exigem
 leitura individual dos erros, incluindo erros altos em produtos esporádicos.
 
-## Exemplo sintético reproduzível
+## Exemplos sintéticos reproduzíveis
 
-Gerado com semente 42 em `scripts/generate_examples.py`. Origem 20/10/2026;
-três produtos com 420 dias, um com 10 dias e catálogo com um produto sem histórico.
-Preço/promoção/calendário são artificiais e conhecidos no exemplo. Não há ruptura
-simulada nem resultados comerciais medidos.
+A carteira fictícia contém três produtos com 420 dias, um com dez dias e um
+produto cadastrado sem histórico. A origem é 20/10/2026. Há registros artificiais
+de indisponibilidade e 24 entregas de fornecedores. Não são dados de uma empresa.
+O exemplo de sazonalidade tem 1.100 dias confirmados disponíveis, permitindo
+avaliar o candidato anual quando o treino de cada janela tiver suporte.
 
-No horizonte 30, com contexto completo e o novo candidato com atrasos, a execução produziu:
+Os [resultados atuais por produto/horizonte](avaliacao_exemplo.csv) incluem datas,
+número de alvos avaliados, censura, método escolhido e método operacional. Para
+regenerar, execute `python -m scripts.evaluate_examples` na raiz. Os dados vêm de
+`scripts/generate_examples.py`, com sementes fixas. Mudanças nos exemplos/modelos
+podem alterar os números; nenhum deles mede retorno comercial.
 
-| Produto | Método selecionado | MAE teste | WAPE teste (%) | Cobertura teste (%) |
-| --- | --- | ---: | ---: | ---: |
-| CAF-001 | Regressão com contexto | 1,80 | 8,21 | 96,67 |
-| CHA-002 | Regressão com contexto | 1,74 | 14,24 | 86,67 |
-| CAC-003 | Regressão com atrasos | 2,63 | 151,54 | 90,00 |
-| NOV-004 | Estimativa inicial | — | — | — |
-
-Esses números ilustram inclusive um erro relativo alto e cobertura abaixo de 90%
-para um produto. Não comprovam utilidade em dados reais. Para reproduzir, abra a
-carteira fictícia, selecione 30 dias, mantenha contexto ligado e confira as métricas.
-
-## Comparação de 7, 14 e 30 dias
-
-`comparar_horizontes` executa a mesma separação temporal para cada horizonte e
-retorna uma linha por SKU/horizonte com o método selecionado, datas de teste,
-janelas, erros e referência semanal. A comparação não escolhe um horizonte
-“vencedor”: os períodos de teste são diferentes. Contexto planejado mais longo é
-recortado corretamente para cada horizonte, sem desabilitar o modelo contextual.
-
-No mesmo exemplo, a redução do MAE no teste frente à referência semanal foi:
-
-| Produto | 7 dias | 14 dias | 30 dias |
-| --- | ---: | ---: | ---: |
-| CAF-001 | 32,14% | 42,50% | 50,34% |
-| CHA-002 | -11,76% | 38,94% | 42,08% |
-| CAC-003 | 0,00% | 19,05% | 9,42% |
-
-O produto CHA-002 perde para a referência no teste de 7 dias. O novo candidato
-com atrasos selecionado para CAC-003 tem erro de teste maior que o Croston-SBA
-selecionado na versão anterior (2,63 contra 2,57). Não se muda a escolha usando
-esse teste: são exemplos de por que um modelo novo e uma boa validação não
-garantem melhora futura. Os valores são apenas do conjunto sintético incluído.
+A comparação tem uma linha por SKU/horizonte com seleção própria para 7/14/30.
+Os períodos de teste diferem; erros com datas ou amostras distintas não medem
+exatamente a mesma dificuldade. Um método novo pode perder para a referência.
 
 ## Limites atuais
 
-Ainda faltam avaliação em dados reais de origem conhecida, tratamento de rupturas
-históricas, monitoramento de mudança de padrão e avaliação econômica da reposição.
+Ainda faltam avaliação em dados reais de origem conhecida e validação comercial
+das recomendações. O tratamento de censura, o monitoramento e o replay de políticas
+são ferramentas de estudo com premissas explícitas; não recuperam demanda perdida
+nem demonstram economia real.
 Não há múltiplos depósitos, perecibilidade, calendário de compras otimizado ou
 estimativa causal do impacto das promoções.
