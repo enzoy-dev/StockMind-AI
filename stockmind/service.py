@@ -15,14 +15,14 @@ from stockmind.data import (
     validar_entregas,
 )
 from stockmind.forecasting import (
-    analisar_previsoes,
     comparar_horizontes as avaliar_horizontes,
     coletar_erros_reposicao,
 )
 from stockmind.inventory import planejar_estoque
 from stockmind.scenarios import simular_cenarios
 from stockmind.analytics import classificar_produtos, analisar_prazos, sugerir_seguranca
-from stockmind.evaluation import avaliar_politicas
+from stockmind.evaluation import avaliar_politicas, avaliar_multiperiodo
+from stockmind.cache import CACHE, forecast_cached
 
 
 def registros(frame):
@@ -55,6 +55,8 @@ def executar_analise(
     custo_falta_unitario=1.0,
     custo_estoque_unitario_dia=0.01,
     custo_pedido=1.0,
+    janela_classificacao=90,
+    numero_periodos_simulacao=1,
 ):
     """Valida, prevê, compara métodos e calcula o estoque; não realiza compras."""
     if isinstance(horizonte, bool) or horizonte not in (7, 14, 30, 90):
@@ -99,6 +101,20 @@ def executar_analise(
             "Variação dos cenários deve ser um número entre 0 e 80 por cento."
         )
     qualidade = inspecionar_vendas(vendas)
+    if (
+        isinstance(janela_classificacao, bool)
+        or not isinstance(janela_classificacao, int)
+        or not 1 <= janela_classificacao <= 3650
+    ):
+        raise ValueError(
+            "Janela da classificação deve ser inteira entre 1 e 3650 dias."
+        )
+    if (
+        isinstance(numero_periodos_simulacao, bool)
+        or not isinstance(numero_periodos_simulacao, int)
+        or not 1 <= numero_periodos_simulacao <= 6
+    ):
+        raise ValueError("Número de períodos deve ser entre 1 e 6.")
     vendas = validar_vendas(vendas)
     origem = vendas["data"].max()
     contexto = None
@@ -162,7 +178,7 @@ def executar_analise(
                 ignore_index=True,
             )
 
-    classificacao = classificar_produtos(vendas)
+    classificacao = classificar_produtos(vendas, janela_classificacao)
     entregas = validar_entregas(
         entregas, origem, fornecedores if usar_estoque else None
     )
@@ -183,20 +199,31 @@ def executar_analise(
                     ] = int(estimativa["prazo_sugerido"])
                     prazos.loc[i, "aplicado"] = True
 
-    previsoes, metricas = analisar_previsoes(vendas, horizonte, contexto)
+    previsoes, metricas = forecast_cached(vendas, horizonte, contexto)
     comparacao = (
-        avaliar_horizontes(vendas, contexto) if comparar_horizontes else pd.DataFrame()
+        avaliar_horizontes(vendas, contexto, executor=forecast_cached)
+        if comparar_horizontes
+        else pd.DataFrame()
     )
     saldos, recomendacoes = pd.DataFrame(), pd.DataFrame()
     cenarios, saldos_cenarios = pd.DataFrame(), pd.DataFrame()
     avaliacao_politicas, diario_politicas = pd.DataFrame(), pd.DataFrame()
+    multiplos, diario_multiplos, consistencia = (
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+    )
     if usar_estoque:
         mapa_prazos = fornecedores.set_index("fornecedor_id")["prazo_dias"]
         prazos_sku = {
             row["sku"]: int(mapa_prazos.loc[row["fornecedor_id"]])
             for row in produtos.to_dict("records")
         }
-        erros_reposicao = coletar_erros_reposicao(vendas, metricas, prazos_sku)
+        erros_reposicao = CACHE.obtain(
+            "residuos-v1",
+            (vendas, metricas, prazos_sku),
+            lambda: coletar_erros_reposicao(vendas, metricas, prazos_sku),
+        )
         seguranca = sugerir_seguranca(produtos, erros_reposicao)
         seguranca["aplicado"] = False
         if seguranca_automatica:
@@ -240,6 +267,19 @@ def executar_analise(
                 custo_estoque_unitario_dia=custo_estoque_unitario_dia,
                 custo_pedido=custo_pedido,
             )
+            if numero_periodos_simulacao > 1:
+                multiplos, diario_multiplos, consistencia = avaliar_multiperiodo(
+                    vendas,
+                    produtos_manuais,
+                    fornecedores_manuais,
+                    numero_periodos=numero_periodos_simulacao,
+                    periodo_dias=periodo_simulacao,
+                    revisao_dias=revisao_dias,
+                    assumir_vendas_como_demanda=assumir_vendas_como_demanda,
+                    custo_falta_unitario=custo_falta_unitario,
+                    custo_estoque_unitario_dia=custo_estoque_unitario_dia,
+                    custo_pedido=custo_pedido,
+                )
     return {
         "origem": origem.date().isoformat(),
         "horizonte": horizonte,
@@ -251,6 +291,8 @@ def executar_analise(
         "avaliar_reposicao": avaliar_reposicao,
         "assumir_vendas_como_demanda": assumir_vendas_como_demanda,
         "periodo_simulacao": periodo_simulacao,
+        "janela_classificacao": janela_classificacao,
+        "numero_periodos_simulacao": numero_periodos_simulacao,
         "custos_simulacao": {
             "falta_unitaria": float(custo_falta_unitario),
             "estoque_unitario_dia": float(custo_estoque_unitario_dia),
@@ -272,4 +314,7 @@ def executar_analise(
         "diario_reposicao": registros(diario_politicas),
         "produtos_planejados": registros(produtos) if usar_estoque else [],
         "fornecedores_planejados": registros(fornecedores) if usar_estoque else [],
+        "avaliacao_multiperiodo": registros(multiplos),
+        "diario_multiperiodo": registros(diario_multiplos),
+        "consistencia_politicas": registros(consistencia),
     }

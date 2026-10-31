@@ -1,0 +1,29 @@
+{
+  "bordas_descartadas": "Primeiro e último dia excluídos por possível cobertura intradiária parcial.",
+  "linhas_originais": 541909,
+  "linhas_apos_filtros": 520798,
+  "data_inicio": "2010-12-02",
+  "data_fim": "2011-12-08",
+  "corte_selecao_skus": "2011-09-09",
+  "skus": [
+    "23166",
+    "84077",
+    "85099B"
+  ],
+  "dias": 372,
+  "hash_motor_previsao": "77dc0710f40888ce5bc4fe6ce164077632807258e5caadf0ac0b369970c937a1",
+  "fonte": "https://archive.ics.uci.edu/dataset/352/online+retail",
+  "doi": "10.24432/C5BW33",
+  "citacao": "Chen, D. (2015). Online Retail. UCI Machine Learning Repository.",
+  "licenca_dados": "CC BY 4.0",
+  "licenca_url": "https://creativecommons.org/licenses/by/4.0/",
+  "mirror": "https://github.com/mrinmaisharma/Online-Retail-Dataset/raw/86f29b80be8887d6af5c5b603864e7cf2fe3caf0/OnlineRetail.xlsx",
+  "sha256": "43465a06f2ccf7c8b5bd2892bc7defb52f97487934fe93b16ae4c3936424676d",
+  "transformacoes": "Remove cancelamentos, quantidades/preços não positivos e códigos não-produto. Seleciona 3 SKUs no treino. Agrega vendas diárias; ausência de fatura=zero registrado. Sem preço futuro ou disponibilidade.",
+  "objetivo": "Previsão de vendas registradas, não demanda não atendida ou ROI.",
+  "horizontes": [
+    7,
+    14,
+    30
+  ]
+}

@@ -174,6 +174,17 @@ CREATE INDEX IF NOT EXISTS forecasts_sku_date ON forecasts(sku, data);
 """
 
 
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS stock_actuals (
+ sku TEXT NOT NULL,
+ data TEXT NOT NULL,
+ estoque_real INTEGER NOT NULL CHECK(estoque_real>=0),
+ atualizado_em TEXT NOT NULL,
+ PRIMARY KEY(sku,data)
+);
+"""
+
+
 class Store:
     def __init__(self, path):
         self.path = str(path)
@@ -543,3 +554,37 @@ class Store:
                 (horizonte,),
             ).fetchall()
         return [{**dict(row), "entrada": inputs[row["run_id"]]} for row in rows]
+
+    def save_stock_actuals(self, rows):
+        from stockmind.stock_tracking import validar_estoques_reais
+
+        frame = validar_estoques_reais(
+            rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        values = [
+            (r["sku"], _day(r["data"]), int(r["estoque_real"]), now)
+            for r in frame.to_dict("records")
+        ]
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                """INSERT INTO stock_actuals VALUES(?,?,?,?) ON CONFLICT(sku,data) DO UPDATE SET estoque_real=excluded.estoque_real,atualizado_em=excluded.atualizado_em""",
+                values,
+            )
+        return len(values)
+
+    def compare_stock_run(self, run_id):
+        from stockmind.stock_tracking import comparar_estoque
+
+        snapshot = self.get_run(run_id)
+        if snapshot is None:
+            return None
+        with self._connection() as conn:
+            actuals = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT sku,data,estoque_real FROM stock_actuals"
+                )
+            ]
+        return comparar_estoque(snapshot, actuals)

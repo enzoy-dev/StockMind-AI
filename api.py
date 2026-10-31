@@ -49,10 +49,16 @@ class AnalysisRequest(RequestModel):
         default=0.01, strict=True, ge=0, allow_inf_nan=False
     )
     custo_pedido: float = Field(default=1.0, strict=True, ge=0, allow_inf_nan=False)
+    janela_classificacao: int = Field(default=90, strict=True, ge=1, le=3650)
+    numero_periodos_simulacao: int = Field(default=1, strict=True, ge=1, le=6)
 
 
 class ActualsRequest(RequestModel):
     vendas: list[dict[str, Any]] = Field(min_length=1)
+
+
+class StockActualsRequest(RequestModel):
+    estoques: list[dict[str, Any]] = Field(min_length=1)
 
 
 class PlanningRequest(RequestModel):
@@ -86,7 +92,7 @@ def create_app(db_path=None):
 
     application = FastAPI(
         title="StockMind-AI",
-        version="0.4.0",
+        version="0.5.0",
         lifespan=lifespan,
         description="Previsões e planejamento local. A aplicação não realiza compras.",
     )
@@ -226,6 +232,8 @@ def create_app(db_path=None):
             custo_falta_unitario=body.custo_falta_unitario,
             custo_estoque_unitario_dia=body.custo_estoque_unitario_dia,
             custo_pedido=body.custo_pedido,
+            janela_classificacao=body.janela_classificacao,
+            numero_periodos_simulacao=body.numero_periodos_simulacao,
         )
         run_id = store().save_run(
             result,
@@ -249,6 +257,8 @@ def create_app(db_path=None):
                 "custo_falta_unitario": body.custo_falta_unitario,
                 "custo_estoque_unitario_dia": body.custo_estoque_unitario_dia,
                 "custo_pedido": body.custo_pedido,
+                "janela_classificacao": body.janela_classificacao,
+                "numero_periodos_simulacao": body.numero_periodos_simulacao,
             },
         )
         return {"id": run_id, "resultado": result}
@@ -317,6 +327,19 @@ def create_app(db_path=None):
         )
         store().save_planning(products, suppliers, orders, origem=body.origem)
         return {"produtos_salvos": len(products), "origem": body.origem.isoformat()}
+
+    @application.post("/estoques-reais", dependencies=[Depends(authenticate)])
+    def save_stock(body: StockActualsRequest):
+        return {"linhas_salvas": store().save_stock_actuals(body.estoques)}
+
+    @application.get(
+        "/analises/{run_id}/estoque-real", dependencies=[Depends(authenticate)]
+    )
+    def compare_stock(run_id: str):
+        result = store().compare_stock_run(run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Análise não encontrada.")
+        return result
 
     return application
 

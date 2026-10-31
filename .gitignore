@@ -12,3 +12,5 @@ data/*.sqlite3-*
 *.db-wal
 data/private/
 data/requisicao_exemplo.json
+test-results/
+data/benchmark_raw/
