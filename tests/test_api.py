@@ -119,6 +119,8 @@ class TestAPI(unittest.TestCase):
                 "custo_falta_unitario": 1.0,
                 "custo_estoque_unitario_dia": 0.01,
                 "custo_pedido": 1.0,
+                "janela_classificacao": 90,
+                "numero_periodos_simulacao": 1,
             },
         )
         self.assertEqual(len(snapshot["resultado"]["previsoes"]), 7)

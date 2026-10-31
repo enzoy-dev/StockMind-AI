@@ -378,16 +378,21 @@ def _analisar_sku(dados, horizonte, contexto):
         amostras_calibracao = 0
     else:
         metricas = []
+        erros_janelas = {}
         escolhido, menor_erro = None, math.inf
         larguras, amostras = {}, {}
         for nome in nomes:
             erros_validacao = []
+            erros_janelas[nome] = []
             for origem in origens:
                 bloco = dados.iloc[origem : origem + horizonte]
                 mascara = _observavel(bloco)
                 esperado = bloco["vendas"].to_numpy(dtype=float)
                 previsto = _prever_bloco(dados, nome, origem, horizonte)
                 erros_validacao.extend(np.abs(esperado[mascara] - previsto[mascara]))
+                erros_janelas[nome].append(
+                    float(np.abs(esperado[mascara] - previsto[mascara]).mean())
+                )
             mae_validacao = float(np.mean(erros_validacao))
             if escolhido is None or mae_validacao < menor_erro - 1e-9:
                 escolhido, menor_erro = nome, mae_validacao
@@ -478,10 +483,29 @@ def _analisar_sku(dados, horizonte, contexto):
         previsao = prever_com_modelo(dados, operacional, horizonte, contexto)
         for linha in metricas:
             linha["selecionado"] = linha["modelo"] == escolhido
+            valores = erros_janelas[linha["modelo"]]
+            linha["mae_validacao_desvio"] = float(np.std(valores))
+            linha["mae_validacao_min"] = min(valores)
+            linha["mae_validacao_max"] = max(valores)
+            linha["janelas_vencidas"] = sum(
+                valor <= min(erros_janelas[m][i] for m in nomes) + 1e-9
+                for i, valor in enumerate(valores)
+            )
+            linha["vitorias_validacao_pct"] = (
+                linha["janelas_vencidas"] / len(valores) * 100
+            )
             if linha["selecionado"] and operacional != escolhido:
                 linha["observacao"] += observacao[len(nota) :]
 
     for linha in metricas:
+        for campo in (
+            "mae_validacao_desvio",
+            "mae_validacao_min",
+            "mae_validacao_max",
+            "janelas_vencidas",
+            "vitorias_validacao_pct",
+        ):
+            linha.setdefault(campo, None)
         linha["modelo_operacional"] = operacional if linha["selecionado"] else None
         linha["dias_disponiveis"] = int(observavel.sum()) if informada else None
         linha["dias_censurados"] = censurados if informada else None
@@ -526,6 +550,11 @@ def _analisar_sku(dados, horizonte, contexto):
         "cobertura_teste",
         "dias_disponiveis",
         "dias_censurados",
+        "mae_validacao_desvio",
+        "mae_validacao_min",
+        "mae_validacao_max",
+        "janelas_vencidas",
+        "vitorias_validacao_pct",
     ):
         avaliacao[coluna] = pd.to_numeric(avaliacao[coluna]).astype(float)
     for coluna in (
@@ -628,7 +657,9 @@ def analisar_previsoes(vendas, horizonte=7, contexto_futuro=None):
     ), pd.concat(metricas, ignore_index=True)
 
 
-def comparar_horizontes(vendas, contexto_futuro=None, horizontes=(7, 14, 30)):
+def comparar_horizontes(
+    vendas, contexto_futuro=None, horizontes=(7, 14, 30), executor=None
+):
     """Resume o método escolhido na validação em cada SKU/horizonte.
 
     A comparação de MAE de teste com a referência semanal é somente um relatório;
@@ -643,7 +674,7 @@ def comparar_horizontes(vendas, contexto_futuro=None, horizontes=(7, 14, 30)):
     resumos = []
     for horizonte in horizontes:
         contexto = _recortar_contexto(vendas, contexto_futuro, horizonte)
-        _, metricas = analisar_previsoes(vendas, horizonte, contexto)
+        _, metricas = (executor or analisar_previsoes)(vendas, horizonte, contexto)
         selecionados = metricas.loc[metricas["selecionado"]].copy()
         selecionados["horizonte"] = horizonte
         selecionados["comparacao_observacao"] = (

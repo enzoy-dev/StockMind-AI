@@ -19,6 +19,11 @@ preservando a venda registrada e distinguindo dias observados de dias avaliados.
 
 ## ABC e XYZ
 
+Por padrão, o serviço usa a mesma janela final de 90 dias para ABC/XYZ,
+configurável por `janela_classificacao`. Produtos recentes são provisórios e não
+entram no denominador ABC definitivo. A função descritiva antiga ainda permite
+histórico inteiro com `janela_dias=None`.
+
 ABC usa o total de `vendas × preco` informado, como faturamento registrado, se
 todos os preços de todos os produtos estiverem disponíveis. Sem essa cobertura,
 a base passa a unidades para todos os produtos, sem misturar bases monetárias

@@ -122,7 +122,7 @@ def _dates(frame, column):
     frame[column] = pd.to_datetime([_date(value, column) for value in frame[column]])
 
 
-def classificar_produtos(vendas):
+def _classificar_periodo(vendas):
     """Classifica ABC por uma base global consistente e XYZ por dias disponíveis.
 
     ABC usa faturamento registrado somente quando TODOS os preços de TODAS as
@@ -231,6 +231,76 @@ def classificar_produtos(vendas):
             }
         )
     return pd.DataFrame(rows, columns=ABC_COLUMNS)
+
+
+def classificar_produtos(vendas, janela_dias=None):
+    """ABC em janela comum; produtos sem cobertura completa ficam provisórios.
+
+    None preserva a análise descritiva do histórico inteiro para chamadas antigas.
+    O serviço usa 90 dias por padrão. Produtos recentes não entram no denominador
+    ABC nem recebem uma posição definitiva com menos dias que os demais.
+    """
+    original = _classificar_periodo(vendas)
+    if janela_dias is None:
+        return original
+    if (
+        isinstance(janela_dias, bool)
+        or not isinstance(janela_dias, int)
+        or not 1 <= janela_dias <= 3650
+    ):
+        raise DataError("janela_dias deve ser inteira entre 1 e 3650.")
+    frame = vendas.copy()
+    frame["sku"] = frame["sku"].astype(str).str.strip()
+    frame["data"] = pd.to_datetime(frame["data"])
+    end = frame["data"].max()
+    start = end - pd.Timedelta(days=janela_dias - 1)
+    period = frame.loc[frame["data"].between(start, end)]
+    counts = period.groupby("sku")["data"].nunique()
+    eligible = set(counts[counts.eq(janela_dias)].index)
+    # A base monetária/quantitativa continua global, inclusive para linhas novas.
+    if original.empty or original["base_abc"].iloc[0] == "unidades_vendidas":
+        period = period.drop(columns="preco", errors="ignore")
+    classified = _classificar_periodo(period.loc[period["sku"].isin(eligible)])
+    indexed = classified.set_index("sku") if not classified.empty else pd.DataFrame()
+    rows = []
+    for sku in sorted(frame["sku"].unique()):
+        complete = sku in eligible
+        current = period.loc[period["sku"].eq(sku)]
+        if complete:
+            row = indexed.loc[sku].to_dict()
+            row["sku"] = sku
+        else:
+            provisional = (
+                _classificar_periodo(current) if not current.empty else pd.DataFrame()
+            )
+            row = (
+                provisional.iloc[0].to_dict()
+                if not provisional.empty
+                else {
+                    "sku": sku,
+                    "base_abc": "unidades_vendidas",
+                    "valor_base": 0,
+                    "classe_xyz": "indefinida",
+                    "cv": None,
+                    "observacoes": "",
+                }
+            )
+            row.update(
+                classe_abc="provisoria", participacao_pct=None, acumulado_pct=None
+            )
+            row["observacoes"] = (
+                f"ABC provisória: {int(counts.get(sku, 0))} de {janela_dias} dias; excluído do denominador da classificação. "
+                + row.get("observacoes", "")
+            )
+        row.update(
+            janela_dias=janela_dias,
+            data_inicio=start,
+            data_fim=end,
+            dias_cobertos=int(counts.get(sku, 0)),
+            abc_provisoria=not complete,
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def analisar_prazos(entregas, fornecedores, origem):

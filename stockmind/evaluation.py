@@ -448,3 +448,56 @@ def avaliar_politicas(
     return pd.DataFrame(summaries, columns=SUMMARY_COLUMNS), pd.DataFrame(
         daily, columns=DAILY_COLUMNS
     )
+
+
+def avaliar_multiperiodo(
+    vendas, produtos, fornecedores, numero_periodos=3, periodo_dias=30, **kwargs
+):
+    """Repete cenários em blocos sem sobreposição, reiniciando o estoque manual.
+
+    Não é uma simulação contínua nem estima estoque histórico real. Cada decisão
+    conserva o corte temporal do replay original; períodos sem dados não são inventados.
+    """
+    count = _integer(numero_periodos, "numero_periodos", minimum=1, maximum=6)
+    width = _integer(periodo_dias, "periodo_dias", choices=(7, 14, 30))
+    sales = validar_vendas(vendas)
+    final = sales["data"].max()
+    summaries, days = [], []
+    for index in range(count):
+        end = final - pd.Timedelta(days=index * width)
+        prefix = sales.loc[sales["data"].le(end)]
+        if prefix.empty:
+            break
+        summary, daily = avaliar_politicas(
+            prefix, produtos, fornecedores, periodo_dias=width, **kwargs
+        )
+        summaries.append(summary.assign(janela=index + 1))
+        days.append(daily.assign(janela=index + 1))
+    combined = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
+    diary = pd.concat(days, ignore_index=True) if days else pd.DataFrame()
+    stability = []
+    if not combined.empty:
+        for (sku, policy), group in combined.groupby(["sku", "politica"]):
+            measured = group.dropna(subset=["custo_total_estimado"])
+            stability.append(
+                {
+                    "sku": sku,
+                    "politica": policy,
+                    "periodos_com_dados": len(group),
+                    "periodos_com_custos": len(measured),
+                    "custo_medio_estimado": float(
+                        measured["custo_total_estimado"].mean()
+                    )
+                    if len(measured)
+                    else None,
+                    "desvio_custo_estimado": float(
+                        measured["custo_total_estimado"].std(ddof=0)
+                    )
+                    if len(measured)
+                    else None,
+                    "atendimento_medio_pct": float(measured["atendimento_pct"].mean())
+                    if measured["atendimento_pct"].notna().any()
+                    else None,
+                }
+            )
+    return combined, diary, pd.DataFrame(stability)

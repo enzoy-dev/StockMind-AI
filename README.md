@@ -19,7 +19,7 @@ nesses exemplos não comprovam redução de faltas ou desempenho em uma empresa 
 - Disponibilidade histórica explícita, com exclusão de alvos censurados e diagnóstico
   quando não há demanda observável.
 - Ciclos mensais/anuais e Gradient Boosting como candidatos com histórico mínimo.
-- ABC/XYZ descritivos, segurança sugerida por erros acumulados e prazo por histórico
+- ABC/XYZ por janela comparável, segurança sugerida por erros acumulados e prazo por histórico
   de entregas, mantendo alternativas manuais quando faltam dados.
 - Estimativas iniciais explícitas para históricos curtos; produtos sem vendas
   no catálogo ficam sem previsão, em vez de receber zero artificial.
@@ -36,6 +36,19 @@ nesses exemplos não comprovam redução de faltas ou desempenho em uma empresa 
 
 Não envia compras nem atualiza estoque de um ERP. O estoque informado é um snapshot
 na data final do histórico, e não um livro de movimentações de estoque.
+
+## Comparabilidade e maturidade
+
+- ABC em janela comum configurável (90 dias por padrão), com produtos recentes provisórios.
+- Cache separado de previsões: mudar estoque/custos/cenários reutiliza o ajuste.
+- Vitórias e dispersão entre janelas para avaliar estabilidade dos métodos.
+- Replay em até seis períodos históricos sem sobreposição.
+- Importação de snapshots reais de estoque e comparação com projeções salvas.
+- Interface modular e relatórios de teste baixáveis na CI por sistema operacional.
+- [Benchmark real UCI Online Retail](reports/uci_retail/README.md), com origem,
+  atribuição, filtros, hashes e resultados favoráveis e desfavoráveis.
+
+[Regras e limitações desses incrementos](docs/maturidade.md).
 
 ## Rodar o dashboard
 
@@ -198,7 +211,7 @@ publicado. Uma hospedagem exige tratar autenticação do dashboard e infraestrut
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe tools/run_tests.py
 ```
 
 CI executa a suíte com Python 3.12 no Linux e Windows. Os testes cobrem isolamento
@@ -206,7 +219,8 @@ temporal, calibração, histórico curto, contexto, lotes, recebimentos, valida�
 rollback, snapshots, API e fluxos do dashboard.
 
 ```text
-app.py                  dashboard
+app.py                  entrada Streamlit
+stockmind/ui/           formulários, telas e componentes
 api.py                  FastAPI e autenticação opcional por chave
 stockmind/data.py       importação e relatório de qualidade
 stockmind/forecasting.py modelos, janelas temporais e faixas

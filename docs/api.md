@@ -22,6 +22,8 @@ Swagger: `http://127.0.0.1:8000/docs`. O padrão do banco é `data/stockmind.sql
 | `POST /vendas` | Insere/corrige realizações por SKU/data, inclusive dias avulsos |
 | `GET /planejamento` | Produtos, fornecedores, pedidos e data do estoque salvo |
 | `PUT /planejamento` | Substitui o cadastro completo em uma transação |
+| `POST /estoques-reais` | Importa snapshots observados de estoque |
+| `GET /analises/{id}/estoque-real` | Compara saldo projetado e estoque observado |
 | `GET /monitoramento` | Diagnóstico prospectivo de erro, sem gravar alertas |
 
 ## Exemplo de análise
@@ -94,7 +96,7 @@ veja as [regras de reposição](reposicao.md) antes de interpretar valores vazio
 
 ## Confiabilidade e políticas
 
-Na API 0.4.0, `entregas` recebe registros com `entrega_id,fornecedor_id,data_pedido,
+Na API 0.5.0, `entregas` recebe registros com `entrega_id,fornecedor_id,data_pedido,
 data_prevista,data_recebida`. São recebimentos históricos até a origem, separados
 de pedidos abertos. As flags `seguranca_automatica` e `ajustar_prazos` aplicam cópias
 das sugestões quando há amostras; os cadastros manuais salvos não são sobrescritos.
@@ -161,3 +163,15 @@ Dados inválidos retornam 422, incluindo relatório de qualidade quando disponí
 ID ausente retorna 404; chave inválida 401; falha SQLite 503, com operação revertida.
 A análise treina localmente por SKU e pode levar tempo em catálogos grandes. Não há
 fila distribuída ou agendamento automático de treinamento.
+
+## Comparabilidade e períodos
+
+`janela_classificacao` é inteiro de 1 a 3650, padrão 90. `numero_periodos_simulacao`
+é inteiro de 1 a 6, padrão 1, e só executa replay adicional quando `avaliar_reposicao`
+está ativo. Esses parâmetros são salvos no snapshot. As novas saídas são
+`avaliacao_multiperiodo,diario_multiperiodo,consistencia_politicas`.
+
+`POST /estoques-reais` recebe `{"estoques":[{"sku":"A","data":"2026-10-21","estoque_real":47}]}`.
+A consulta de comparação mantém desconhecido um dia sem snapshot; não altera a
+análise original. As rotas usam a mesma configuração de chave das demais.
+Veja [cache, ABC, estabilidade e comparação de estoque](maturidade.md).
