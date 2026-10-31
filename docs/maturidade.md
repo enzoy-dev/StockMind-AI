@@ -89,3 +89,10 @@ O código de saída de falha é preservado e um SO não cancela a coleta do outr
 A API do GitHub/log autenticado estava inacessível neste ambiente; o resumo enviado
 do erro anterior de Windows não continha o traceback. A causa anterior permanece
 sem diagnóstico confirmado. Não há exclusão de testes de Windows nesta alteração.
+
+A [execução de verificação #10](https://github.com/enzoy-dev/StockMind-AI/actions/runs/41246244317)
+também terminou com erro no job Windows e publicou os dois artefatos. A falha de
+Windows continua pendente. Para continuar o diagnóstico, abra essa execução com
+login, baixe `test-results-windows-latest` em **Artifacts**, extraia `unittest.log`
+e consulte o bloco `ERROR`/`Traceback` no final. O resumo `Process completed with
+exit code 1` não identifica o teste nem a causa.
