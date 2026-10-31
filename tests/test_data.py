@@ -15,6 +15,7 @@ from stockmind.data import (
     inspecionar_vendas,
     ler_csv,
     validar_contexto_futuro,
+    validar_entregas,
     validar_planejamento,
     validar_vendas,
 )
@@ -118,7 +119,7 @@ class TestSalesData(unittest.TestCase):
                 validar_vendas(self.sales.assign(**{col: value}))
 
     def test_numeric_booleans_are_rejected_without_coercion(self):
-        for column in ["vendas", "preco", "promocao", "feriado"]:
+        for column in ["vendas", "preco", "promocao", "feriado", "disponivel"]:
             for value in [True, False]:
                 with (
                     self.subTest(column=column, value=value),
@@ -154,6 +155,54 @@ class TestSalesData(unittest.TestCase):
             raw.at[0, column] = value
             with self.subTest(column=column), self.assertRaises(DataError):
                 validar_vendas(raw)
+
+    def test_legacy_availability_unknown_is_not_assumed_available(self):
+        result = validar_vendas(self.sales)
+        self.assertNotIn("disponivel", result)
+        report = inspecionar_vendas(self.sales)
+        warning = report.loc[report["campo"].eq("disponivel")]
+        self.assertEqual(len(warning), 1)
+        self.assertEqual(warning.iloc[0]["nivel"], "aviso")
+        self.assertIn("não informada", warning.iloc[0]["mensagem"])
+
+    def test_censored_sales_and_true_zero_sales_are_preserved(self):
+        sales = self.sales.assign(disponivel=1)
+        sales.loc[0, ["vendas", "disponivel"]] = [0, 0]
+        sales.loc[1, ["vendas", "disponivel"]] = [5, 0]
+        sales.loc[2, "vendas"] = 0
+        actual = validar_vendas(sales)
+        self.assertEqual(len(actual), 45)
+        self.assertEqual(actual["vendas"].tolist(), sales["vendas"].tolist())
+        self.assertEqual(actual["disponivel"].tolist(), sales["disponivel"].tolist())
+        warning = inspecionar_vendas(sales).query("campo == 'disponivel'")
+        self.assertEqual(len(warning), 1)
+        self.assertIn("2 dias", warning.iloc[0]["mensagem"])
+        self.assertIn("censuradas", warning.iloc[0]["mensagem"])
+
+    def test_availability_must_be_complete_finite_and_binary(self):
+        for value in [None, "", -1, 2, 0.5, float("inf"), float("nan")]:
+            sales = self.sales.assign(disponivel=pd.Series([1] * 45, dtype=object))
+            sales.at[0, "disponivel"] = value
+            with self.subTest(value=value), self.assertRaises(DataError) as context:
+                validar_vendas(sales)
+            self.assertIn("disponivel", set(context.exception.report["campo"]))
+
+    def test_censored_counts_are_reported_per_product(self):
+        first = self.sales.assign(disponivel=1)
+        first.loc[:1, "disponivel"] = 0
+        second = self.sales.assign(sku="002", disponivel=1)
+        second.loc[0, "disponivel"] = 0
+        report = inspecionar_vendas(pd.concat([first, second]))
+        warnings = report.loc[report["campo"].eq("disponivel")].set_index("sku")
+        self.assertIn("2 dias", warnings.loc["001", "mensagem"])
+        self.assertIn("1 dias", warnings.loc["002", "mensagem"])
+
+    def test_censored_zero_days_do_not_claim_intermittent_demand(self):
+        sales = self.sales.assign(disponivel=0, vendas=0)
+        sales.loc[44, ["disponivel", "vendas"]] = [1, 10]
+        report = inspecionar_vendas(sales)
+        self.assertTrue(report["campo"].eq("disponivel").all())
+        self.assertEqual(len(validar_vendas(sales)), 45)
 
 
 class TestFutureContext(unittest.TestCase):
@@ -216,6 +265,135 @@ class TestFutureContext(unittest.TestCase):
         ]:
             with self.assertRaises(DataError):
                 validar_contexto_futuro(future, self.sales, 7)
+
+    def test_future_availability_is_unknown_and_not_accepted_as_context(self):
+        for value in [0, 1]:
+            with self.subTest(value=value), self.assertRaises(DataError) as context:
+                validar_contexto_futuro(
+                    self.future.assign(disponivel=value), self.sales, 7
+                )
+            self.assertIn("disponivel", set(context.exception.report["campo"]))
+
+
+class TestHistoricalReceipts(unittest.TestCase):
+    def setUp(self):
+        self.receipts = pd.DataFrame(
+            [
+                {
+                    "entrega_id": "001",
+                    "fornecedor_id": "F1",
+                    "data_pedido": "2026-01-01",
+                    "data_prevista": "2026-01-05",
+                    "data_recebida": "2026-01-06",
+                },
+                {
+                    "entrega_id": "002",
+                    "fornecedor_id": "F1",
+                    "data_pedido": "2026-01-07",
+                    "data_prevista": "2026-01-12",
+                    "data_recebida": "2026-01-10",
+                },
+            ]
+        )
+        self.origin = pd.Timestamp("2026-01-10")
+        self.suppliers = pd.DataFrame(
+            [{"fornecedor_id": "F1", "nome": "Fornecedor", "prazo_dias": 5}]
+        )
+
+    def test_early_and_late_receipts_are_valid_and_idempotent(self):
+        result = validar_entregas(self.receipts, self.origin, self.suppliers)
+        self.assertEqual(result["entrega_id"].tolist(), ["001", "002"])
+        self.assertLess(result.loc[1, "data_recebida"], result.loc[1, "data_prevista"])
+        pd.testing.assert_frame_equal(
+            validar_entregas(result, self.origin, self.suppliers), result
+        )
+
+    def test_csv_preserves_receipt_identifiers_and_supplier_codes(self):
+        raw = ler_csv(
+            StringIO(
+                "entrega_id,fornecedor_id,data_pedido,data_prevista,data_recebida\n001,002,2026-01-01,2026-01-05,2026-01-04\n"
+            )
+        )
+        result = validar_entregas(raw, self.origin)
+        self.assertEqual(result.iloc[0]["entrega_id"], "001")
+        self.assertEqual(result.iloc[0]["fornecedor_id"], "002")
+
+    def test_none_and_empty_receipts_return_empty_canonical_tables(self):
+        for raw in [None, pd.DataFrame(), self.receipts.iloc[:0]]:
+            with self.subTest(raw_type=type(raw).__name__):
+                result = validar_entregas(raw, self.origin)
+                self.assertTrue(result.empty)
+                self.assertEqual(
+                    result.columns.tolist(), self.receipts.columns.tolist()
+                )
+
+    def test_no_future_received_information_allowed(self):
+        # The second receipt is known on Jan10, not Jan9.
+        with self.assertRaisesRegex(DataError, "referência"):
+            validar_entregas(self.receipts, "2026-01-09")
+        self.assertEqual(len(validar_entregas(self.receipts, "2026-01-10")), 2)
+
+    def test_promised_future_date_is_allowed_if_delivery_already_arrived(self):
+        raw = self.receipts.iloc[[1]].assign(data_prevista="2026-02-01")
+        result = validar_entregas(raw, self.origin)
+        self.assertEqual(result.iloc[0]["data_prevista"], pd.Timestamp("2026-02-01"))
+
+    def test_order_must_not_follow_promised_or_received_date(self):
+        for column in ["data_prevista", "data_recebida"]:
+            with self.subTest(column=column), self.assertRaises(DataError) as context:
+                validar_entregas(
+                    self.receipts.assign(**{column: "2025-12-31"}), self.origin
+                )
+            self.assertIn(column, set(context.exception.report["campo"]))
+
+    def test_historical_lead_times_are_bounded_to_365_days(self):
+        raw = self.receipts.iloc[:1].assign(
+            data_prevista="2027-01-01", data_recebida="2027-01-01"
+        )
+        self.assertEqual(len(validar_entregas(raw, "2027-01-01")), 1)
+        for column in ["data_prevista", "data_recebida"]:
+            with self.subTest(column=column), self.assertRaisesRegex(DataError, "365"):
+                validar_entregas(raw.assign(**{column: "2027-01-02"}), "2027-01-02")
+
+    def test_supplier_reference_validation_is_optional(self):
+        self.assertEqual(len(validar_entregas(self.receipts, self.origin)), 2)
+        with self.assertRaisesRegex(DataError, "não cadastrado"):
+            validar_entregas(
+                self.receipts, self.origin, self.suppliers.assign(fornecedor_id="OUTRO")
+            )
+
+    def test_duplicate_empty_ids_dates_and_unknown_fields_are_reported(self):
+        raw = self.receipts.copy()
+        raw.loc[1, "entrega_id"] = "001"
+        raw.loc[0, "fornecedor_id"] = ""
+        raw.loc[1, "data_recebida"] = "data inválida"
+        raw["quantidade"] = 10
+        with self.assertRaises(DataError) as context:
+            validar_entregas(raw, self.origin)
+        fields = set(context.exception.report["campo"])
+        self.assertTrue(
+            {"entrega_id", "fornecedor_id", "data_recebida", "quantidade"}.issubset(
+                fields
+            )
+        )
+
+    def test_same_day_receipts_allowed_but_date_times_rejected(self):
+        raw = self.receipts.iloc[:1].assign(
+            data_pedido="2026-01-01",
+            data_prevista="2026-01-01",
+            data_recebida="2026-01-01",
+        )
+        self.assertEqual(len(validar_entregas(raw, self.origin)), 1)
+        with self.assertRaises(DataError):
+            validar_entregas(
+                raw.assign(data_recebida="2026-01-01 12:00:00"), self.origin
+            )
+
+    def test_different_receipts_same_supplier_and_day_are_not_duplicates(self):
+        raw = pd.concat(
+            [self.receipts.iloc[:1], self.receipts.iloc[:1].assign(entrega_id="OUTRA")]
+        )
+        self.assertEqual(len(validar_entregas(raw, self.origin)), 2)
 
 
 class TestPlanningData(unittest.TestCase):

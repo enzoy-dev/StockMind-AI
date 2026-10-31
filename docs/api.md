@@ -22,6 +22,7 @@ Swagger: `http://127.0.0.1:8000/docs`. O padrão do banco é `data/stockmind.sql
 | `POST /vendas` | Insere/corrige realizações por SKU/data, inclusive dias avulsos |
 | `GET /planejamento` | Produtos, fornecedores, pedidos e data do estoque salvo |
 | `PUT /planejamento` | Substitui o cadastro completo em uma transação |
+| `GET /monitoramento` | Diagnóstico prospectivo de erro, sem gravar alertas |
 
 ## Exemplo de análise
 
@@ -54,7 +55,16 @@ O corpo aceita:
   "revisao_dias": 7,
   "comparar_horizontes": false,
   "variacao_cenario_pct": 20.0,
-  "usar_planejamento_salvo": false
+  "usar_planejamento_salvo": false,
+  "entregas": null,
+  "seguranca_automatica": false,
+  "ajustar_prazos": false,
+  "avaliar_reposicao": false,
+  "assumir_vendas_como_demanda": false,
+  "periodo_simulacao": 30,
+  "custo_falta_unitario": 1.0,
+  "custo_estoque_unitario_dia": 0.01,
+  "custo_pedido": 1.0
 }
 ```
 
@@ -77,9 +87,35 @@ não são aceitos como percentual; `comparar_horizontes` exige booleano JSON.
 
 Os novos resultados são `comparacao_horizontes`, `cenarios` e `saldos_cenarios`.
 Sem comparação, o primeiro é vazio; sem planejamento, os dois últimos são vazios.
-Tudo fica preservado no snapshot com seus parâmetros. Não há migração SQLite.
+Tudo fica preservado no snapshot com seus parâmetros. O SQLite antigo recebe
+uma coluna nullable de disponibilidade por migração aditiva, mantendo o desconhecido.
 As recomendações incluem data-limite, data acionável, quantidade na data e prioridade;
 veja as [regras de reposição](reposicao.md) antes de interpretar valores vazios.
+
+## Confiabilidade e políticas
+
+Na API 0.4.0, `entregas` recebe registros com `entrega_id,fornecedor_id,data_pedido,
+data_prevista,data_recebida`. São recebimentos históricos até a origem, separados
+de pedidos abertos. As flags `seguranca_automatica` e `ajustar_prazos` aplicam cópias
+das sugestões quando há amostras; os cadastros manuais salvos não são sobrescritos.
+
+`avaliar_reposicao:true` ativa o replay de 7/14/30 dias (`periodo_simulacao`). Os
+três custos são números finitos não negativos, usados como premissas de cenário.
+Essas três flags exigem produtos e fornecedores. Com disponibilidade ausente,
+`assumir_vendas_como_demanda:true` libera somente um proxy explícito na simulação;
+nunca libera dias conhecidos como indisponíveis e não autoriza segurança automática
+a partir de demanda desconhecida.
+
+O resultado acrescenta `classificacao_produtos,prazos_fornecedores,seguranca_estoque,
+residuos_reposicao,avaliacao_reposicao,diario_reposicao,produtos_planejados,
+fornecedores_planejados`. Inputs originais e valores efetivos ficam distinguíveis.
+Análise totalmente censurada pode retornar 201 com zero pontos e diagnóstico
+`demanda_indisponivel`; não são previsões de zero vendas.
+
+`GET /monitoramento?horizonte=7&janela_recente=7&janela_base=21&limiar_aumento_pct=30`
+usa a mesma autenticação das outras rotas de negócio. Exige suporte mínimo e
+previsões gravadas antes dos dias-alvo em São Paulo. Consulte as
+[premissas de disponibilidade, segurança, simulação e monitoramento](confiabilidade.md).
 
 ## Acompanhar uma previsão
 
@@ -93,6 +129,10 @@ O exemplo acima é fictício. Envie para `POST /vendas` e consulte
 `GET /analises/{id}/comparacao`. A resposta contém resumo por produto e linhas
 comparáveis. MAE/viés estão em unidades; WAPE/cobertura são porcentagens.
 Datas não observadas ficam fora dos erros; uma venda 0 é uma observação válida.
+Se `disponivel=0`, a realização fica registrada, mas não entra em erros ou cobertura.
+`periodos_observados` conta registros; `periodos_avaliados` exclui os censurados,
+com contagens separadas para disponibilidade desconhecida. Não envie disponibilidade
+futura como contexto planejado.
 Correções atualizam os resultados realizados, sem mudar o snapshot original.
 
 ## Planejamento salvo

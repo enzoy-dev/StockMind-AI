@@ -71,7 +71,7 @@ class TestDashboard(unittest.TestCase):
         self.assertTrue(
             any("Carteira fictícia" in radio.options for radio in app.radio)
         )
-        self.assertEqual(len(app.tabs), 5)
+        self.assertEqual(len(app.tabs), 6)
         self.assertEqual(app.tabs[0].label, "Decisões de reposição")
         self.assertTrue(
             any("SEM-005" in frame.value.to_string() for frame in app.dataframe)
@@ -85,6 +85,88 @@ class TestDashboard(unittest.TestCase):
         self.assertTrue(
             any("PRODUTO-001" in select.options for select in app.selectbox)
         )
+
+    def test_exemplo_sazonal_e_modelo_anual_disponivel(self):
+        app = self.app()
+        app.radio[0].set_value("Sazonalidade anual").run(timeout=90)
+        self.assertFalse(app.exception)
+        self.assertEqual(app.metric[0].value, "1")
+        self.assertTrue(
+            any(
+                "Regressão com ciclo anual" in frame.value.to_string()
+                for frame in app.dataframe
+            )
+        )
+
+    def test_aplica_estimativas_com_amostras_sem_alterar_cadastro(self):
+        app = self.app()
+        next(
+            c
+            for c in app.checkbox
+            if c.label == "Aplicar prazo sugerido pelo histórico de entregas"
+        ).set_value(True).run(timeout=90)
+        next(
+            c
+            for c in app.checkbox
+            if c.label == "Aplicar estoque de segurança calculado"
+        ).set_value(True).run(timeout=90)
+        self.assertFalse(app.exception)
+        table = next(
+            frame.value
+            for frame in app.dataframe
+            if "Segurança sugerida" in frame.value.columns
+        )
+        self.assertTrue(table["Aplicado nesta análise"].any())
+
+    def test_avaliacao_de_politicas_conclui_e_expoe_limite_censurado(self):
+        app = self.app()
+        next(
+            c
+            for c in app.checkbox
+            if c.label == "Avaliar políticas de reposição no histórico"
+        ).set_value(True).run(timeout=120)
+        self.assertFalse(app.exception)
+        summary = next(
+            frame.value
+            for frame in app.dataframe
+            if "Custo estimado do cenário" in frame.value.columns
+        )
+        self.assertEqual(len(summary), 15)
+        self.assertTrue(
+            summary.loc[summary["Produto"].eq("CAC-003"), "Situação"]
+            .str.contains("censurada", case=False)
+            .all()
+        )
+        self.assertTrue(any("Período: 30 dias" in text.value for text in app.markdown))
+
+    def test_demanda_totalmente_censurada_exibe_diagnostico_e_salva(self):
+        from stockmind.data import ler_csv as real_read
+
+        def censored(source):
+            result = real_read(source)
+            if Path(source).name == "vendas_multiplos_exemplo.csv":
+                result["disponivel"] = 0
+            return result
+
+        with patch("stockmind.data.ler_csv", side_effect=censored):
+            app = self.app()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.metric[0].value, "0")
+            self.assertTrue(
+                any(
+                    "Não há demanda observável" in message.value
+                    for message in app.warning
+                )
+            )
+            next(
+                b
+                for b in app.button
+                if b.label == "Salvar análise e entradas no histórico"
+            ).click().run(timeout=90)
+            self.assertFalse(app.exception)
+            self.assertTrue(
+                any("Análise salva:" in message.value for message in app.success)
+            )
 
     def test_upload_aguarda_arquivo(self):
         app = self.app()

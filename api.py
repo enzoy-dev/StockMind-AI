@@ -36,6 +36,19 @@ class AnalysisRequest(RequestModel):
     variacao_cenario_pct: float = Field(
         default=20.0, strict=True, ge=0, le=80, allow_inf_nan=False
     )
+    entregas: list[dict[str, Any]] | None = None
+    seguranca_automatica: StrictBool = False
+    ajustar_prazos: StrictBool = False
+    avaliar_reposicao: StrictBool = False
+    assumir_vendas_como_demanda: StrictBool = False
+    periodo_simulacao: Literal[7, 14, 30] = 30
+    custo_falta_unitario: float = Field(
+        default=1.0, strict=True, ge=0, allow_inf_nan=False
+    )
+    custo_estoque_unitario_dia: float = Field(
+        default=0.01, strict=True, ge=0, allow_inf_nan=False
+    )
+    custo_pedido: float = Field(default=1.0, strict=True, ge=0, allow_inf_nan=False)
 
 
 class ActualsRequest(RequestModel):
@@ -73,7 +86,7 @@ def create_app(db_path=None):
 
     application = FastAPI(
         title="StockMind-AI",
-        version="0.3.0",
+        version="0.4.0",
         lifespan=lifespan,
         description="Previsões e planejamento local. A aplicação não realiza compras.",
     )
@@ -131,7 +144,9 @@ def create_app(db_path=None):
     def analyse(body: AnalysisRequest):
         from stockmind.data import (
             ORDER_COLUMNS,
+            RECEIPT_COLUMNS,
             validar_contexto_futuro,
+            validar_entregas,
             validar_planejamento,
             validar_vendas,
         )
@@ -180,16 +195,37 @@ def create_app(db_path=None):
                 max(body.horizonte, 30) if body.comparar_horizontes else body.horizonte
             )
             future = validar_contexto_futuro(future, sales, horizonte_contexto)
+        receipts = None
+        if body.entregas is not None:
+            receipts = validar_entregas(
+                pd.DataFrame(
+                    body.entregas,
+                    columns=RECEIPT_COLUMNS if not body.entregas else None,
+                ),
+                sales["data"].max(),
+                supplier_frame,
+            )
         result = executar_analise(
             sales,
             horizonte=body.horizonte,
             contexto_futuro=future,
-            produtos=product_frame,
-            fornecedores=supplier_frame,
-            pedidos=order_frame,
+            produtos=None if product_frame is None else product_frame.copy(deep=True),
+            fornecedores=None
+            if supplier_frame is None
+            else supplier_frame.copy(deep=True),
+            pedidos=None if order_frame is None else order_frame.copy(deep=True),
             revisao_dias=body.revisao_dias,
             comparar_horizontes=body.comparar_horizontes,
             variacao_cenario_pct=body.variacao_cenario_pct,
+            entregas=receipts,
+            seguranca_automatica=body.seguranca_automatica,
+            ajustar_prazos=body.ajustar_prazos,
+            avaliar_reposicao=body.avaliar_reposicao,
+            assumir_vendas_como_demanda=body.assumir_vendas_como_demanda,
+            periodo_simulacao=body.periodo_simulacao,
+            custo_falta_unitario=body.custo_falta_unitario,
+            custo_estoque_unitario_dia=body.custo_estoque_unitario_dia,
+            custo_pedido=body.custo_pedido,
         )
         run_id = store().save_run(
             result,
@@ -198,11 +234,21 @@ def create_app(db_path=None):
             fornecedores=supplier_frame,
             pedidos=order_frame,
             contexto_futuro=future,
+            entregas=body.entregas,
+            vendas_originais=body.vendas,
             parametros={
                 "horizonte": body.horizonte,
                 "revisao_dias": body.revisao_dias,
                 "comparar_horizontes": body.comparar_horizontes,
                 "variacao_cenario_pct": body.variacao_cenario_pct,
+                "seguranca_automatica": body.seguranca_automatica,
+                "ajustar_prazos": body.ajustar_prazos,
+                "avaliar_reposicao": body.avaliar_reposicao,
+                "assumir_vendas_como_demanda": body.assumir_vendas_como_demanda,
+                "periodo_simulacao": body.periodo_simulacao,
+                "custo_falta_unitario": body.custo_falta_unitario,
+                "custo_estoque_unitario_dia": body.custo_estoque_unitario_dia,
+                "custo_pedido": body.custo_pedido,
             },
         )
         return {"id": run_id, "resultado": result}
@@ -226,6 +272,27 @@ def create_app(db_path=None):
         if result is None:
             raise HTTPException(status_code=404, detail="Análise não encontrada.")
         return result
+
+    @application.get("/monitoramento", dependencies=[Depends(authenticate)])
+    def monitoring(
+        horizonte: int = Query(default=7, ge=7, le=90),
+        janela_recente: int = Query(default=7, ge=1, le=90),
+        janela_base: int = Query(default=21, ge=1, le=365),
+        limiar_aumento_pct: float = Query(
+            default=30, ge=0, le=1000, allow_inf_nan=False
+        ),
+    ):
+        from stockmind.monitoring import monitorar_desempenho
+
+        return _records(
+            monitorar_desempenho(
+                store(),
+                horizonte,
+                janela_recente,
+                janela_base,
+                limiar_aumento_pct,
+            )
+        )
 
     @application.post("/vendas", dependencies=[Depends(authenticate)])
     def ingest_actuals(body: ActualsRequest):

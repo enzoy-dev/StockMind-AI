@@ -103,7 +103,16 @@ def _sales_rows(sales):
                 if flag not in (0, 1):
                     raise ValueError(f"{field} deve ser 0 ou 1.")
             flags.append(flag)
-        rows.append((sku, day, units, price, *flags))
+        availability = row.get("disponivel")
+        if availability is pd.NA or (
+            isinstance(availability, float) and math.isnan(availability)
+        ):
+            availability = None
+        if availability is not None:
+            availability = _number(availability, "disponivel", integer=True)
+            if availability not in (0, 1):
+                raise ValueError("disponivel deve ser 0, 1 ou ausente.")
+        rows.append((sku, day, units, price, *flags, availability))
     return rows
 
 
@@ -115,6 +124,7 @@ CREATE TABLE IF NOT EXISTS sales (
     preco REAL CHECK(preco >= 0),
     promocao INTEGER CHECK(promocao IN (0, 1)),
     feriado INTEGER CHECK(feriado IN (0, 1)),
+    disponivel INTEGER CHECK(disponivel IN (0, 1)),
     atualizado_em TEXT NOT NULL,
     PRIMARY KEY(sku, data)
 );
@@ -177,6 +187,15 @@ class Store:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(SCHEMA)
+            # Migração aditiva para instalações anteriores; não regrava snapshots.
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(sales)")
+            }
+            if "disponivel" not in columns:
+                connection.execute(
+                    "ALTER TABLE sales ADD COLUMN disponivel INTEGER CHECK(disponivel IN (0, 1))"
+                )
 
     @contextmanager
     def _connection(self):
@@ -199,11 +218,14 @@ class Store:
     def _upsert_sales(connection, rows):
         now = datetime.now(timezone.utc).isoformat()
         connection.executemany(
-            """INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO sales
+                (sku, data, vendas, preco, promocao, feriado, disponivel, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sku, data) DO UPDATE SET
                 vendas=excluded.vendas, preco=COALESCE(excluded.preco, sales.preco),
                 promocao=COALESCE(excluded.promocao, sales.promocao),
                 feriado=COALESCE(excluded.feriado, sales.feriado),
+                disponivel=COALESCE(excluded.disponivel, sales.disponivel),
                 atualizado_em=excluded.atualizado_em""",
             [(*row, now) for row in rows],
         )
@@ -301,13 +323,26 @@ class Store:
         pedidos=None,
         contexto_futuro=None,
         parametros=None,
+        entregas=None,
+        vendas_originais=None,
     ):
         """Salva snapshot imutável; falhas revertem realizações e configuração juntas."""
         rows = _sales_rows(sales)
         result = _plain(result)
         forecasts = result.get("previsoes", [])
         if not forecasts:
-            raise ValueError("A análise precisa conter pelo menos uma previsão.")
+            unavailable = {
+                str(metric.get("sku"))
+                for metric in result.get("metricas", [])
+                if metric.get("status") == "demanda_indisponivel"
+            }
+            if not {row[0] for row in rows}.issubset(unavailable):
+                raise ValueError(
+                    "Análise sem previsões exige diagnóstico explícito de demanda indisponível."
+                )
+            empty_horizon = _number(
+                result.get("horizonte"), "horizonte", integer=True, positive=True
+            )
         forecast_rows = []
         for forecast in forecasts:
             forecast_rows.append(
@@ -321,19 +356,24 @@ class Store:
                 )
             )
         origin = max(row[1] for row in rows)
-        horizon = max(
-            sum(1 for r in forecast_rows if r[0] == sku)
-            for sku in {r[0] for r in forecast_rows}
+        horizon = (
+            max(
+                sum(1 for r in forecast_rows if r[0] == sku)
+                for sku in {r[0] for r in forecast_rows}
+            )
+            if forecast_rows
+            else empty_horizon
         )
         run_id = uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
         input_snapshot = {
-            "vendas": _records(sales),
+            "vendas": _records(sales if vendas_originais is None else vendas_originais),
             "produtos": _records(produtos),
             "fornecedores": _records(fornecedores),
             "pedidos": _records(pedidos),
             "contexto_futuro": _records(contexto_futuro),
             "parametros": _plain(parametros or {}),
+            "entregas": _records(entregas),
         }
         result_json = json.dumps(result, ensure_ascii=False, allow_nan=False)
         input_json = json.dumps(input_snapshot, ensure_ascii=False, allow_nan=False)
@@ -403,7 +443,7 @@ class Store:
                 return None
             joined = connection.execute(
                 """SELECT f.sku, f.data, f.previsao, f.limite_inferior, f.limite_superior,
-                   s.vendas AS vendas_reais FROM forecasts f LEFT JOIN sales s
+                   s.vendas AS vendas_reais, s.disponivel FROM forecasts f LEFT JOIN sales s
                    ON s.sku=f.sku AND s.data=f.data WHERE f.run_id=? ORDER BY f.sku, f.data""",
                 (run_id,),
             ).fetchall()
@@ -412,7 +452,7 @@ class Store:
             record = dict(row)
             record["erro"] = (
                 None
-                if row["vendas_reais"] is None
+                if row["vendas_reais"] is None or row["disponivel"] == 0
                 else row["previsao"] - row["vendas_reais"]
             )
             record["erro_absoluto"] = (
@@ -422,7 +462,9 @@ class Store:
             grouped.setdefault(row["sku"], []).append(record)
         summaries = []
         for sku, predictions in grouped.items():
-            observed = [r for r in predictions if r["vendas_reais"] is not None]
+            actuals = [r for r in predictions if r["vendas_reais"] is not None]
+            observed = [r for r in actuals if r["disponivel"] != 0]
+            censored = len(actuals) - len(observed)
             intervals = [
                 r
                 for r in observed
@@ -435,7 +477,12 @@ class Store:
                 {
                     "sku": sku,
                     "periodos_previstos": len(predictions),
-                    "periodos_observados": n,
+                    "periodos_observados": len(actuals),
+                    "periodos_avaliados": n,
+                    "periodos_censurados": censored,
+                    "periodos_disponibilidade_desconhecida": sum(
+                        r["disponivel"] is None for r in observed
+                    ),
                     "mae": absolute_error / n if n else None,
                     "vies": sum(r["erro"] for r in observed) / n if n else None,
                     "wape": absolute_error / total_actual * 100
@@ -452,8 +499,47 @@ class Store:
                     if intervals
                     else None,
                     "status": "sem_realizacoes"
+                    if not actuals
+                    else (
+                        "sem_alvos_avaliaveis"
+                        if n == 0
+                        else (
+                            (
+                                "parcial"
+                                if len(actuals) < len(predictions)
+                                else "completo"
+                            )
+                            + ("_com_censura" if censored else "")
+                        )
+                    ),
+                    "base_avaliacao": "sem_alvos_avaliaveis"
                     if n == 0
-                    else ("parcial" if n < len(predictions) else "completo"),
+                    else (
+                        "vendas_observadas_disponibilidade_desconhecida"
+                        if any(r["disponivel"] is None for r in observed)
+                        else "vendas_em_dias_disponiveis"
+                    ),
                 }
             )
         return {"id": run_id, "resumo": summaries, "comparacoes": comparisons}
+
+    def monitoring_rows(self, horizonte=7):
+        """Leitura para monitoramento; entradas compartilhadas entre linhas do run."""
+        if isinstance(horizonte, bool) or horizonte not in (7, 14, 30, 90):
+            raise ValueError("Horizonte deve ser 7, 14, 30 ou 90 dias.")
+        with self._connection() as connection:
+            inputs = {
+                row["id"]: json.loads(row["entrada_json"])
+                for row in connection.execute(
+                    "SELECT id, entrada_json FROM runs WHERE horizonte=?", (horizonte,)
+                )
+            }
+            rows = connection.execute(
+                """SELECT r.id AS run_id, r.origem, r.criado_em, r.horizonte,
+                    f.sku, f.data, f.previsao, s.vendas AS vendas_reais, s.disponivel
+                FROM forecasts f JOIN runs r ON r.id=f.run_id
+                LEFT JOIN sales s ON s.sku=f.sku AND s.data=f.data
+                WHERE r.horizonte=? ORDER BY f.sku, f.data, r.origem, r.criado_em, r.id""",
+                (horizonte,),
+            ).fetchall()
+        return [{**dict(row), "entrada": inputs[row["run_id"]]} for row in rows]

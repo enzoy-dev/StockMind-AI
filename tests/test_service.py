@@ -72,6 +72,86 @@ class TestService(unittest.TestCase):
         self.assertEqual(len(result["previsoes"]), 7)
         self.assertEqual(result["recomendacoes"], [])
         self.assertEqual(result["saldos"], [])
+        self.assertTrue(
+            all(
+                c["classe_xyz"] == "indefinida"
+                for c in result["classificacao_produtos"]
+            )
+        )
+
+    def test_estimativas_aplicam_copias_e_replay_usa_parametros_manuais(self):
+        read = lambda name: ler_csv(ROOT / "data" / name)
+        products, suppliers = (
+            read("produtos_exemplo.csv"),
+            read("fornecedores_exemplo.csv"),
+        )
+        before_p, before_f = products.copy(deep=True), suppliers.copy(deep=True)
+        result = executar_analise(
+            read("vendas_multiplos_exemplo.csv"),
+            30,
+            read("contexto_futuro_exemplo.csv"),
+            products,
+            suppliers,
+            read("pedidos_exemplo.csv"),
+            entregas=read("entregas_exemplo.csv"),
+            seguranca_automatica=True,
+            ajustar_prazos=True,
+            avaliar_reposicao=True,
+        )
+        pd.testing.assert_frame_equal(products, before_p)
+        pd.testing.assert_frame_equal(suppliers, before_f)
+        self.assertTrue(any(r["aplicado"] for r in result["seguranca_estoque"]))
+        self.assertTrue(all(r["aplicado"] for r in result["prazos_fornecedores"]))
+        caf = [r for r in result["avaliacao_reposicao"] if r["sku"] == "CAF-001"]
+        self.assertTrue(
+            all(r["seguranca_manual"] == 20 and r["prazo_dias"] == 5 for r in caf)
+        )
+        censored = [r for r in result["avaliacao_reposicao"] if r["sku"] == "CAC-003"]
+        self.assertTrue(
+            all(
+                r["status"] == "demanda_censurada" and r["custo_total_estimado"] is None
+                for r in censored
+            )
+        )
+        json.dumps(result, allow_nan=False)
+
+    def test_sem_demanda_observavel_nao_fabrica_zero(self):
+        vendas = pd.DataFrame(
+            {
+                "sku": ["A"] * 30,
+                "data": pd.date_range("2026-01-01", periods=30),
+                "vendas": [10] * 30,
+                "disponivel": [0] * 30,
+            }
+        )
+        result = executar_analise(vendas)
+        self.assertEqual(result["previsoes"], [])
+        self.assertTrue(
+            all(
+                m["status"] == "demanda_indisponivel" and m["mae_teste"] is None
+                for m in result["metricas"]
+            )
+        )
+
+    def test_novos_parametros_invalidos_e_estoque_obrigatorio(self):
+        data = ler_csv(ROOT / "vendas_exemplo.csv")
+        params = [
+            {"seguranca_automatica": 1},
+            {"ajustar_prazos": "true"},
+            {"avaliar_reposicao": 1},
+            {"assumir_vendas_como_demanda": "false"},
+            {"periodo_simulacao": True},
+            {"periodo_simulacao": 90},
+            {"custo_falta_unitario": -1},
+            {"custo_estoque_unitario_dia": float("nan")},
+            {"custo_pedido": True},
+            {"seguranca_automatica": True},
+            {"ajustar_prazos": True},
+            {"avaliar_reposicao": True},
+        ]
+        for parameter in params:
+            with self.subTest(parameter=parameter), self.assertRaises(ValueError):
+                executar_analise(data, **parameter)
 
     def test_relatorio_de_erro_nao_vira_previsao(self):
         data = pd.DataFrame({"data": ["2026-01-01", "2026-01-03"], "vendas": [10, 20]})

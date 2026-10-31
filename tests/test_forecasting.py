@@ -9,6 +9,10 @@ import pandas as pd
 
 from stockmind.forecasting import (
     MODELO_ATRASOS,
+    MODELO_MENSAL,
+    MODELO_ANUAL,
+    MODELO_ARVORE,
+    coletar_erros_reposicao,
     MODELO_CONTEXTO,
     MODELO_INICIAL,
     analisar_previsoes,
@@ -423,6 +427,239 @@ class TestForecasting(unittest.TestCase):
             }
         )
         return dados, plano
+
+
+class TestDemandReliability(unittest.TestCase):
+    def test_sazonalidade_mensal_e_anual_exigem_ciclos_no_treino_de_validacao(self):
+        for antes, depois, nome in (
+            (131, 132, MODELO_MENSAL),
+            (771, 772, MODELO_ANUAL),
+        ):
+            with self.subTest(modelo=nome):
+                _, curta = analisar_previsoes(historico(antes))
+                _, longa = analisar_previsoes(historico(depois))
+                self.assertNotIn(nome, curta["modelo"].tolist())
+                self.assertIn(nome, longa["modelo"].tolist())
+
+    def test_ciclo_mensal_representa_calendario_sem_precisar_vendas_futuras(self):
+        dados = historico(300)
+        datas = pd.DatetimeIndex(dados["data"])
+        dados["vendas"] = np.round(
+            100
+            + 0.1 * np.arange(len(dados))
+            + 30 * np.sin(2 * np.pi * (datas.day - 1) / datas.days_in_month)
+        )
+        _, metricas = analisar_previsoes(dados)
+        erros = metricas.set_index("modelo")
+        self.assertLess(
+            erros.loc[MODELO_MENSAL, "mae_teste"],
+            erros.loc["Semana anterior", "mae_teste"],
+        )
+
+    def test_arvore_ajusta_somente_alvos_disponiveis_e_calendario_conhecido(self):
+        dados = historico(100)
+        dados["disponivel"] = 1
+        dados.loc[::5, "disponivel"] = 0
+        dados.loc[::5, "vendas"] = 999999
+        ajustes, previsoes = [], []
+
+        class ArvoreInstrumentada:
+            def __init__(self, **kwargs):
+                self.parametros = kwargs
+
+            def fit(self, x, y):
+                ajustes.append((x.copy(), np.asarray(y), self.parametros))
+                return self
+
+            def predict(self, x):
+                previsoes.append(x.copy())
+                return np.full(len(x), 10.0)
+
+        with patch(
+            "stockmind.forecasting.GradientBoostingRegressor", ArvoreInstrumentada
+        ):
+            resultado = prever_com_modelo(dados, MODELO_ARVORE, 7)
+        x, y, parametros = ajustes[0]
+        self.assertEqual(len(y), 80)
+        self.assertFalse(np.isin(y, [999999]).any())
+        self.assertNotIn("vendas", x.columns)
+        self.assertEqual(parametros["n_estimators"], 40)
+        self.assertEqual(parametros["max_depth"], 2)
+        np.testing.assert_array_equal(previsoes[0]["dia"], np.arange(100, 107))
+        np.testing.assert_array_equal(resultado, np.full(7, 10))
+
+    def test_regressoes_nao_usam_valores_censurados_como_alvo(self):
+        dados = historico()
+        dados["vendas"] = 10
+        dados["disponivel"] = 1
+        dados.loc[[10, 20, 50], "disponivel"] = 0
+        dados.loc[[10, 20, 50], "vendas"] = 999999
+        for nome in ("Regressão linear", "Regressão com dia da semana", MODELO_MENSAL):
+            with self.subTest(modelo=nome):
+                previsto = prever_com_modelo(dados, nome)
+                np.testing.assert_allclose(previsto, np.full(7, 10), atol=1e-8)
+
+    def test_atrasos_semana_e_croston_usam_sufixo_totalmente_disponivel(self):
+        dados = historico()
+        dados["vendas"] = 10
+        dados["disponivel"] = 1
+        dados.loc[50, "disponivel"] = 0
+        original = dados.copy()
+        dados.loc[50, "vendas"] = 999999
+        for nome in (MODELO_ATRASOS, "Semana anterior", "Croston-SBA"):
+            with self.subTest(modelo=nome):
+                np.testing.assert_allclose(
+                    prever_com_modelo(dados, nome), prever_com_modelo(original, nome)
+                )
+        dados.loc[len(dados) - 1, "disponivel"] = 0
+        for nome in (MODELO_ATRASOS, "Semana anterior", "Croston-SBA"):
+            with self.subTest(modelo=nome), self.assertRaises(ValueError):
+                prever_com_modelo(dados, nome)
+        np.testing.assert_allclose(
+            prever_com_modelo(dados, "Última venda"), np.full(7, 10)
+        )
+
+    def test_censura_e_excluida_de_validacao_calibracao_e_teste(self):
+        dados = historico()
+        dados["disponivel"] = 1
+        dados.loc[[100, 120, 135], "disponivel"] = 0
+        dados.loc[[100, 120, 135], "vendas"] = 999999
+        previsao, metricas = analisar_previsoes(dados)
+        linha = metricas.set_index("modelo").loc["Regressão linear"]
+        self.assertAlmostEqual(linha["mae_validacao"], 0)
+        self.assertAlmostEqual(linha["mae_teste"], 0)
+        self.assertEqual(linha["amostras_validacao"], 20)
+        self.assertEqual(linha["amostras_calibracao"], 13)
+        self.assertEqual(linha["amostras_teste"], 6)
+        self.assertEqual(linha["status"], "avaliacao_parcial")
+        self.assertTrue(previsao["limite_inferior"].isna().all())
+
+    def test_disponibilidade_so_do_teste_nao_muda_escolha(self):
+        dados = historico()
+        dados["disponivel"] = 1
+        _, original = analisar_previsoes(dados)
+        dados.loc[len(dados) - 7 :, "disponivel"] = 0
+        _, alterada = analisar_previsoes(dados)
+        pd.testing.assert_frame_equal(
+            original[["modelo", "mae_validacao", "selecionado"]],
+            alterada[["modelo", "mae_validacao", "selecionado"]],
+        )
+        self.assertTrue(alterada["mae_teste"].isna().all())
+        self.assertTrue(alterada["amostras_teste"].eq(0).all())
+
+    def test_metodo_inapto_apos_validacao_nao_ganha_score_de_fallback(self):
+        dados = historico()
+        padrao = [5, 7, 9, 11, 20, 40, 15]
+        dados["vendas"] = [padrao[d.dayofweek] for d in dados["data"]]
+        dados["disponivel"] = 1
+        dados.loc[[len(dados) - 8, len(dados) - 1], "disponivel"] = 0
+        previsao, metricas = analisar_previsoes(dados)
+        vencedor = metricas.loc[metricas["selecionado"]].iloc[0]
+        self.assertEqual(vencedor["modelo"], "Semana anterior")
+        self.assertTrue(pd.isna(vencedor["mae_teste"]))
+        self.assertEqual(vencedor["amostras_teste"], 0)
+        self.assertEqual(vencedor["modelo_operacional"], MODELO_INICIAL)
+        self.assertTrue(previsao["modelo"].eq(MODELO_INICIAL).all())
+        self.assertTrue(previsao["modelo_validacao"].eq("Semana anterior").all())
+        self.assertTrue(previsao["limite_superior"].isna().all())
+
+    def test_somente_censura_nao_produz_previsao_zero(self):
+        dados = historico()
+        dados["disponivel"] = 0
+        dados["vendas"] = 0
+        previsao, metricas = analisar_previsoes(dados)
+        self.assertTrue(previsao.empty)
+        self.assertIn("previsao", previsao.columns)
+        self.assertEqual(len(metricas), 1)
+        self.assertTrue(metricas["selecionado"].iloc[0])
+        self.assertEqual(metricas["status"].iloc[0], "demanda_indisponivel")
+        self.assertTrue(
+            metricas[["mae_validacao", "mae_teste", "cobertura_teste"]]
+            .isna()
+            .all()
+            .all()
+        )
+
+    def test_sem_disponibilidade_mantem_avaliacao_de_vendas_com_nota(self):
+        previsao, metricas = analisar_previsoes(historico())
+        self.assertFalse(previsao["disponibilidade_informada"].any())
+        self.assertTrue(metricas["alvo_avaliacao"].eq("vendas_observadas_proxy").all())
+        self.assertTrue(
+            previsao["observacao"].str.contains("Disponibilidade não informada").all()
+        )
+
+    def test_validacao_totalmente_censurada_nao_inventa_erro(self):
+        dados = historico()
+        dados["disponivel"] = 1
+        dados.loc[98:118, "disponivel"] = 0
+        previsao, metricas = analisar_previsoes(dados)
+        self.assertFalse(previsao.empty)
+        self.assertEqual(metricas["modelo"].iloc[0], MODELO_INICIAL)
+        self.assertTrue(metricas["mae_validacao"].isna().all())
+
+    def test_residuos_de_reposicao_ficam_na_calibracao_sem_sobreposicao(self):
+        dados = historico(200)
+        dados["disponivel"] = 1
+        _, metricas = analisar_previsoes(dados, 30)
+        amostras = coletar_erros_reposicao(dados, metricas, {"A": 5})
+        self.assertEqual(len(amostras), 12)
+        selecionada = metricas.loc[metricas["selecionado"]].iloc[0]
+        self.assertGreaterEqual(
+            amostras["alvo_inicio"].min(), selecionada["calibracao_inicio"]
+        )
+        self.assertLessEqual(amostras["alvo_fim"].max(), selecionada["calibracao_fim"])
+        self.assertLess(amostras["alvo_fim"].max(), selecionada["teste_inicio"])
+        for anterior, atual in zip(
+            amostras.iloc[:-1].itertuples(), amostras.iloc[1:].itertuples()
+        ):
+            self.assertLess(anterior.alvo_fim, atual.alvo_inicio)
+        dados.loc[len(dados) - 30 :, "vendas"] += 1000
+        _, alteradas = analisar_previsoes(dados, 30)
+        depois = coletar_erros_reposicao(dados, alteradas, {"A": 5})
+        pd.testing.assert_frame_equal(amostras, depois)
+
+    def test_residuo_positivo_e_subprevisao_e_censura_nao_vira_zero(self):
+        dados = historico(100)
+        dados["disponivel"] = 1
+        metrica = self.metrica_manual(dados)
+        amostras = coletar_erros_reposicao(dados, metrica, {"A": 5})
+        self.assertTrue(amostras["erro_acumulado"].eq(15).all())
+        dados.loc[40, "disponivel"] = 0
+        censuradas = coletar_erros_reposicao(dados, metrica, {"A": 5})
+        self.assertEqual(len(censuradas), len(amostras) - 1)
+        self.assertTrue(censuradas["fonte"].eq("dias_disponiveis").all())
+        self.assertFalse(censuradas["proxy"].any())
+
+    def test_residuos_proxy_exigem_opt_in_e_prazo_zero_nao_inventa_amostra(self):
+        dados = historico(100)
+        metrica = self.metrica_manual(dados)
+        self.assertTrue(coletar_erros_reposicao(dados, metrica, {"A": 5}).empty)
+        proxy = coletar_erros_reposicao(dados, metrica, {"A": 5}, permitir_proxy=True)
+        self.assertTrue(proxy["proxy"].all())
+        self.assertTrue(proxy["fonte"].eq("vendas_proxy").all())
+        self.assertTrue(
+            coletar_erros_reposicao(dados, metrica, {"A": 0}, permitir_proxy=True).empty
+        )
+        metrica["modelo_operacional"] = MODELO_INICIAL
+        self.assertTrue(
+            coletar_erros_reposicao(dados, metrica, {"A": 5}, permitir_proxy=True).empty
+        )
+
+    @staticmethod
+    def metrica_manual(dados):
+        return pd.DataFrame(
+            [
+                {
+                    "sku": "A",
+                    "modelo": "Última venda",
+                    "modelo_operacional": "Última venda",
+                    "selecionado": True,
+                    "calibracao_inicio": dados["data"].iloc[40],
+                    "calibracao_fim": dados["data"].iloc[69],
+                    "teste_inicio": dados["data"].iloc[70],
+                }
+            ]
+        )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,12 @@ nesses exemplos não comprovam redução de faltas ou desempenho em uma empresa 
 - Até três janelas temporais para seleção e um teste final separado.
 - Referências simples, regressões com calendário/atrasos, Croston-SBA e modelo
   contextual quando preços/promoções/feriados futuros são conhecidos.
-- Faixas empíricas de 90%, calibradas em período independente quando há dados.
+- Faixas empíricas de 90%, calibradas em período separado quando há dados.
+- Disponibilidade histórica explícita, com exclusão de alvos censurados e diagnóstico
+  quando não há demanda observável.
+- Ciclos mensais/anuais e Gradient Boosting como candidatos com histórico mínimo.
+- ABC/XYZ descritivos, segurança sugerida por erros acumulados e prazo por histórico
+  de entregas, mantendo alternativas manuais quando faltam dados.
 - Estimativas iniciais explícitas para históricos curtos; produtos sem vendas
   no catálogo ficam sem previsão, em vez de receber zero artificial.
 - Cadastro de produtos, fornecedores, estoque de segurança, lotes e pedidos abertos.
@@ -24,6 +29,8 @@ nesses exemplos não comprovam redução de faltas ou desempenho em uma empresa 
 - Cenários de demanda menor/base/maior com variação percentual configurável.
 - Dashboard com filtros, gráficos interativos e exportação de CSVs.
 - SQLite com snapshots de entradas/previsões e comparação com vendas posteriores.
+- Replay de três políticas com condições iguais e custos assumidos; monitoramento
+  prospectivo de piora do erro sem duplicar previsões sobrepostas.
 - API para análise, cadastros e atualização de vendas realizadas.
 - Relatório de qualidade, testes e CI para Linux e Windows.
 
@@ -53,7 +60,8 @@ GPU ou serviço externo.
 
 1. **Carteira fictícia** já inclui vendas, fornecedores, estoque, pedidos e plano
    futuro de contexto. Possui três produtos com 420 dias, um com 10 dias e um
-   produto cadastrado sem vendas. A origem é **20/10/2026**, independentemente de hoje.
+   produto cadastrado sem vendas. Inclui disponibilidade e 24 entregas históricas.
+   A origem é **20/10/2026**, independentemente de hoje.
 2. **Exemplo de um produto** mantém o CSV original de 60 dias.
 3. **Enviar CSV** aceita seus dados. Cadastros de estoque podem ser editados na
    tela, importados ou carregados do SQLite.
@@ -62,6 +70,10 @@ GPU ou serviço externo.
    e excesso. As abas Previsões e Cenários de demanda detalham os cálculos.
 5. **Salvar análise e entradas no histórico** registra um snapshot. Salvar não
    equivale a aprovar compras. Depois, registre novas vendas para comparar.
+
+O modo **Sazonalidade anual** contém 1.100 dias fictícios. As opções de planejamento
+permitem aplicar segurança/prazos sugeridos e avaliar políticas. A aba Histórico
+tem monitoramento das previsões que foram gravadas antes dos dias previstos.
 
 A análise é calculada em memória e pode ficar em cache por até cinco minutos.
 A gravação de entradas e resultados ocorre por ações explícitas; abrir a interface
@@ -82,6 +94,11 @@ CAF-001,2026-10-20,20
 Uma linha por dia/produto, datas consecutivas e mesma data final para todos os
 produtos. Lacunas não são preenchidas com zero. Históricos de um dia são aceitos
 com estimativa inicial e aviso, sem alegar validação.
+
+Informe `disponivel=1` somente quando o produto esteve disponível durante todo o
+dia; use `0` para indisponibilidade parcial ou total. A quantidade registrada é
+preservada, sem virar demanda zero. A coluna ausente significa desconhecida.
+Se nenhum dia for observável, o diagnóstico pode ser salvo sem fabricar pontos.
 
 Preço, promoção e feriado são opcionais. O modelo contextual só é comparado quando
 há histórico **e plano futuro completos** desses campos; eles devem ter sido
@@ -104,8 +121,11 @@ Se a previsão não cobrir prazo + revisão, a sugestão fica indefinida com o h
 necessário. Uma compra futura pode exigir horizonte maior do que comprar na referência.
 Sem cruzamento da segurança, a próxima data de compra fica desconhecida além do
 período previsto. Excesso é uma triagem de 30 dias, indisponível em horizontes menores.
-Compras de produtos com histórico curto são provisórias. Segurança não é estimada
-automaticamente; vencimento, orçamento e custo de falta não são otimizados.
+Compras de produtos com histórico curto ou censura são provisórias. A segurança
+calculada é opcional, exige blocos sem sobreposição e não garante atendimento.
+Vencimento e orçamento não são otimizados; custos do replay são hipóteses configuradas.
+
+[Disponibilidade, ABC/XYZ, segurança, prazos, replay e monitoramento](docs/confiabilidade.md).
 
 ## Modelagem e limites
 
@@ -123,6 +143,9 @@ cresce até três conforme o histórico disponível. Séries curtas usam a médi
 últimos até 14 dias, sem métricas ou faixas artificiais.
 O candidato com atrasos só participa quando o primeiro treino de validação tem
 pelo menos 42 dias. Ele usa valores previstos na recursão, sem consultar vendas futuras.
+Mensal/anual exigem 90/730 observações de venda elegíveis em todos os treinos de validação;
+Gradient Boosting exige 60. Os mínimos da tabela pressupõem demanda observável.
+Alvos censurados podem reduzir amostras e tornar métricas/faixas indisponíveis.
 
 A comparação 7/14/30 tem seleção independente por horizonte. Os testes cobrem
 períodos distintos e seus erros não medem uma precisão em datas idênticas. Redução
@@ -153,6 +176,9 @@ nem as entradas de análises já salvas. Datas sem realização continuam descon
 e não entram nas métricas como zero. O cadastro salvo inclui a data do estoque;
 reutilizá-lo com outra data de referência é bloqueado para evitar estoque antigo.
 O SQLite é local, transacional e adequado a este estágio; não há sincronização ERP.
+Ao abrir um banco antigo, uma migração aditiva inclui disponibilidade nullable.
+Dados antigos continuam com disponibilidade desconhecida; snapshots são preservados.
+Faça backup do arquivo antes de atualizar uma instalação que tenha dados importantes.
 
 ## API
 
@@ -186,6 +212,9 @@ stockmind/data.py       importação e relatório de qualidade
 stockmind/forecasting.py modelos, janelas temporais e faixas
 stockmind/inventory.py   saldo e reposição
 stockmind/scenarios.py   sensibilidade das decisões à demanda
+stockmind/analytics.py   ABC/XYZ, segurança e estatísticas de fornecedores
+stockmind/evaluation.py  replay temporal das políticas
+stockmind/monitoring.py  desempenho prospectivo por produto/horizonte
 stockmind/service.py     fluxo compartilhado, sem persistência implícita
 stockmind/storage.py     SQLite e acompanhamento de realizações
 ```

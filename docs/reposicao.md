@@ -76,18 +76,16 @@ Excesso compara disponível + pedidos até 30 dias com vendas previstas de 30 di
 segurança. `unidades_acima_alvo_30dias` quantifica a diferença; sem 30 dias,
 a avaliação fica vazia. Pode haver excesso e falta antes de um pedido chegar.
 
-## Exemplo fictício
+## Valores manuais e sugestões calculadas
 
-Carteira incluída, origem 20/10/2026, horizonte 30 e revisão de 7 dias:
+As opções novas de segurança e prazo alteram cópias dos parâmetros, com amostras
+registradas e fallback manual. Por isso, o tamanho e a data de compra podem mudar
+quando são habilitadas. Os valores originais continuam preservados no snapshot.
+A classificação ABC/XYZ é descritiva e não troca a política automaticamente.
 
-- CAF-001: data-limite 16/10/2026, ação na origem 20/10/2026, 222 unidades.
-  Há falta antes da entrega; prioridade crítica.
-- CHA-002: compra sugerida em 26/10/2026, 114 unidades. Comprar na origem
-  corresponderia a 36 unidades; são janelas diferentes, não valores intercambiáveis.
-- CAC-003: excesso no horizonte, sem nova data de compra identificada.
-- SEM-005: sem histórico, data e quantidade desconhecidas.
-
-Esses resultados são demonstrações em dados inventados, sem retorno comercial medido.
+O exemplo agora inclui indisponibilidade e novos candidatos de previsão. Os
+resultados numéricos da versão anterior não devem ser interpretados como fixos.
+Confira as tabelas atuais e suas premissas em [Confiabilidade](confiabilidade.md).
 
 ## Cenários de demanda
 
