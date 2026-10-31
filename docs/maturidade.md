@@ -86,13 +86,16 @@ A CI executa `python tools/run_tests.py` nas duas plataformas e publica
 `test-results-ubuntu-latest` e `test-results-windows-latest`, inclusive quando testes
 falham. Cada artefato contém `unittest.log` com nomes/tracebacks e `junit.xml`.
 O código de saída de falha é preservado e um SO não cancela a coleta do outro.
-A API do GitHub/log autenticado estava inacessível neste ambiente; o resumo enviado
-do erro anterior de Windows não continha o traceback. A causa anterior permanece
-sem diagnóstico confirmado. Não há exclusão de testes de Windows nesta alteração.
 
 A [execução de verificação #10](https://github.com/enzoy-dev/StockMind-AI/actions/runs/41246244317)
-também terminou com erro no job Windows e publicou os dois artefatos. A falha de
-Windows continua pendente. Para continuar o diagnóstico, abra essa execução com
-login, baixe `test-results-windows-latest` em **Artifacts**, extraia `unittest.log`
-e consulte o bloco `ERROR`/`Traceback` no final. O resumo `Process completed with
-exit code 1` não identifica o teste nem a causa.
+também terminou com erro no job Windows e publicou os dois artefatos. O traceback
+enviado depois identificou `WinError 32` na exclusão de `old.sqlite3`, durante a
+limpeza do teste de migração. Seus dois contextos `sqlite3.connect(...)` encerravam
+transações, mas não fechavam as conexões. O teste agora usa `contextlib.closing`
+para liberar os arquivos explicitamente após cada contexto, inclusive em falhas.
+Os testes e as verificações de migração continuam habilitados nas duas plataformas.
+
+Para investigar outras falhas, abra a execução com login, baixe
+`test-results-windows-latest` em **Artifacts**, extraia `unittest.log` e consulte
+o bloco `ERROR`/`Traceback` no final. O resumo `Process completed with exit code 1`
+não identifica o teste nem a causa.

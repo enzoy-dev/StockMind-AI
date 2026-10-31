@@ -1,4 +1,5 @@
 from copy import deepcopy
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -230,7 +231,8 @@ class TestStore(unittest.TestCase):
         old_input = {"vendas": [{"sku": "001", "data": "2026-01-02", "vendas": 3}]}
         import json
 
-        with sqlite3.connect(path) as connection:
+        # O contexto SQLite finaliza a transação, mas não fecha a conexão.
+        with closing(sqlite3.connect(path)) as connection, connection:
             connection.executescript("""
                 CREATE TABLE sales(sku TEXT NOT NULL, data TEXT NOT NULL, vendas INTEGER NOT NULL,
                     preco REAL, promocao INTEGER, feriado INTEGER, atualizado_em TEXT NOT NULL,
@@ -269,7 +271,7 @@ class TestStore(unittest.TestCase):
                 [{"sku": "002", "data": "2026-01-03", "vendas": 0, "disponivel": 0}]
             )
             store.close()
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection, connection:
             fields = [row[1] for row in connection.execute("PRAGMA table_info(sales)")]
             self.assertEqual(fields.count("disponivel"), 1)
             self.assertEqual(
