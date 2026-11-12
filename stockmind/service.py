@@ -23,6 +23,8 @@ from stockmind.scenarios import simular_cenarios
 from stockmind.analytics import classificar_produtos, analisar_prazos, sugerir_seguranca
 from stockmind.evaluation import avaliar_politicas, avaliar_multiperiodo
 from stockmind.cache import CACHE, forecast_cached
+from stockmind.purchasing import explicar_compras, distribuir_orcamento
+from stockmind.stress import avaliar_estresse as simular_estresse
 
 
 def registros(frame):
@@ -57,6 +59,11 @@ def executar_analise(
     custo_pedido=1.0,
     janela_classificacao=90,
     numero_periodos_simulacao=1,
+    orcamento_compras=None,
+    custos_unitarios=None,
+    avaliar_estresse=False,
+    atraso_fornecedor_dias=3,
+    choque_demanda_pct=20.0,
 ):
     """Valida, prevê, compara métodos e calcula o estoque; não realiza compras."""
     if isinstance(horizonte, bool) or horizonte not in (7, 14, 30, 90):
@@ -72,6 +79,7 @@ def executar_analise(
     for nome, valor in {
         "seguranca_automatica": seguranca_automatica,
         "ajustar_prazos": ajustar_prazos,
+        "avaliar_estresse": avaliar_estresse,
         "avaliar_reposicao": avaliar_reposicao,
         "assumir_vendas_como_demanda": assumir_vendas_como_demanda,
     }.items():
@@ -100,6 +108,19 @@ def executar_analise(
         raise ValueError(
             "Variação dos cenários deve ser um número entre 0 e 80 por cento."
         )
+    if (
+        isinstance(atraso_fornecedor_dias, bool)
+        or not isinstance(atraso_fornecedor_dias, int)
+        or not 0 <= atraso_fornecedor_dias <= 30
+    ):
+        raise ValueError("Atraso assumido deve ser inteiro entre 0 e 30 dias.")
+    if (
+        isinstance(choque_demanda_pct, bool)
+        or not isinstance(choque_demanda_pct, Real)
+        or not math.isfinite(choque_demanda_pct)
+        or not 0 <= choque_demanda_pct <= 80
+    ):
+        raise ValueError("Choque de demanda deve estar entre 0 e 80%.")
     qualidade = inspecionar_vendas(vendas)
     if (
         isinstance(janela_classificacao, bool)
@@ -141,7 +162,7 @@ def executar_analise(
 
     usar_estoque = any(valor is not None for valor in (produtos, fornecedores, pedidos))
     if not usar_estoque and (
-        seguranca_automatica or ajustar_prazos or avaliar_reposicao
+        seguranca_automatica or ajustar_prazos or avaliar_reposicao or avaliar_estresse
     ):
         raise ValueError(
             "Para ajustar segurança/prazos ou simular reposição, informe produtos e fornecedores."
@@ -280,7 +301,49 @@ def executar_analise(
                     custo_estoque_unitario_dia=custo_estoque_unitario_dia,
                     custo_pedido=custo_pedido,
                 )
+    memoria, diagnosticos = explicar_compras(
+        vendas,
+        previsoes,
+        saldos,
+        recomendacoes,
+        produtos,
+        revisao_dias,
+        metricas=metricas,
+    )
+    plano_orcamento, resumo_orcamento = distribuir_orcamento(
+        recomendacoes, produtos, orcamento_compras, custos_unitarios
+    )
+    if plano_orcamento:
+        by_sku = diagnosticos.set_index("sku").to_dict("index")
+        for row in plano_orcamento:
+            row["situacao_dados"] = by_sku[row["sku"]]["situacao_dados"]
+            row["motivos_dados"] = by_sku[row["sku"]]["motivos"]
+    estresse, diario_estresse = pd.DataFrame(), pd.DataFrame()
+    if avaliar_estresse:
+        estresse, diario_estresse = simular_estresse(
+            vendas,
+            produtos_manuais,
+            fornecedores_manuais,
+            periodo_dias=periodo_simulacao,
+            numero_periodos=numero_periodos_simulacao,
+            atraso_dias=atraso_fornecedor_dias,
+            choque_pct=float(choque_demanda_pct),
+            revisao_dias=revisao_dias,
+            assumir_vendas_como_demanda=assumir_vendas_como_demanda,
+            custo_falta_unitario=custo_falta_unitario,
+            custo_estoque_unitario_dia=custo_estoque_unitario_dia,
+            custo_pedido=custo_pedido,
+        )
     return {
+        "memoria_compras": registros(memoria),
+        "diagnosticos_decisao": registros(diagnosticos),
+        "plano_orcamento": plano_orcamento,
+        "resumo_orcamento": resumo_orcamento,
+        "avaliacao_estresse": registros(estresse),
+        "diario_estresse": registros(diario_estresse),
+        "avaliar_estresse": avaliar_estresse,
+        "atraso_fornecedor_dias": atraso_fornecedor_dias,
+        "choque_demanda_pct": float(choque_demanda_pct),
         "origem": origem.date().isoformat(),
         "horizonte": horizonte,
         "revisao_dias": revisao_dias,

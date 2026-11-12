@@ -175,3 +175,16 @@ está ativo. Esses parâmetros são salvos no snapshot. As novas saídas são
 A consulta de comparação mantém desconhecido um dia sem snapshot; não altera a
 análise original. As rotas usam a mesma configuração de chave das demais.
 Veja [cache, ABC, estabilidade e comparação de estoque](maturidade.md).
+
+## Memória, orçamento e estresse
+
+Veja [contratos e premissas](compras-explicaveis.md). POST `/analises` aceita
+`orcamento_compras` (decimal ou nulo), `custos_unitarios` (mapa SKU/decimal),
+`avaliar_estresse` (false), `atraso_fornecedor_dias` (0..30, padrão 3) e
+`choque_demanda_pct` (0..80, padrão 20). Orçamento exige cadastros; estresse usa
+os parâmetros manuais e o mesmo período/número de janelas do replay.
+
+Saídas adicionais: `memoria_compras`, `diagnosticos_decisao`, `plano_orcamento`,
+`resumo_orcamento`, `avaliacao_estresse` e `diario_estresse`. Dinheiro da reserva
+é string decimal. Entradas inválidas retornam 422 antes de salvar a análise.
+As novas entradas e resultados são preservados nos snapshots.

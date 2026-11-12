@@ -50,6 +50,16 @@ na data final do histórico, e não um livro de movimentações de estoque.
 
 [Regras e limitações desses incrementos](docs/maturidade.md).
 
+## Explicar e priorizar compras
+
+A tela de decisões inclui memória de cálculo por SKU e diagnóstico dos dados.
+É possível reservar um orçamento com custos unitários informados, respeitando
+prioridade, mínimo e lote, e comparar políticas sob prazo ampliado e demanda
+maior/menor. A reserva não envia pedidos nem garante uma combinação ótima.
+
+[Regras, limites e campos novos da API](docs/compras-explicaveis.md) ·
+[Benchmark ampliado de nove produtos](reports/uci_retail_expanded/README.md).
+
 ## Rodar o dashboard
 
 Python 3.12 recomendado. No PowerShell, dentro desta pasta:
@@ -234,5 +244,6 @@ stockmind/storage.py     SQLite e acompanhamento de realizações
 ```
 
 Os CSVs fictícios podem ser regenerados com `python scripts/generate_examples.py`
-(semente 42, sem dados externos). O projeto ainda precisa de avaliação com dados
-reais de origem e autorização conhecidas; não apresenta resultados comerciais medidos.
+(semente 42, sem dados externos). O projeto possui benchmarks recortados de vendas registradas do UCI Online Retail,
+mas ainda precisa de validação operacional com dados de estoque e compras autorizados;
+não apresenta resultados comerciais medidos.

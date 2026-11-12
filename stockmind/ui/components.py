@@ -9,6 +9,40 @@ ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data"
 
 LABELS = {
+    "situacao_dados": "Situação dos dados",
+    "motivos": "Motivos da revisão",
+    "dias_historico": "Dias de histórico",
+    "dias_previstos": "Dias previstos",
+    "garantia": "Limitação do diagnóstico",
+    "tipo_compra": "Tipo de compra",
+    "data_compra": "Data de compra",
+    "origem": "Data de referência",
+    "estoque_inicial": "Estoque na referência",
+    "revisao_dias": "Intervalo de revisão (dias)",
+    "chegada": "Chegada estimada",
+    "fim_protecao": "Fim da proteção",
+    "cobertura_completa": "Previsão cobre a janela?",
+    "menor_saldo_janela": "Menor saldo na janela",
+    "data_menor_saldo": "Data do menor saldo",
+    "necessidade_antes_lote": "Necessidade antes do lote",
+    "quantidade_sugerida": "Quantidade sugerida",
+    "recebimentos_ate_protecao": "Recebimentos até o fim da proteção",
+    "consumo_previsto_ate_protecao": "Consumo até o fim da proteção",
+    "falta_antes_entrega": "Há falta antes da entrega?",
+    "regra": "Regra de cálculo",
+    "quantidade_reservada": "Unidades com orçamento reservado",
+    "quantidade_nao_coberta": "Unidades sem orçamento",
+    "custo_unitario": "Custo por unidade",
+    "custo_reservado": "Valor reservado",
+    "saldo_orcamento": "Orçamento restante",
+    "status_orcamento": "Situação da reserva",
+    "motivos_dados": "Ressalvas dos dados",
+    "atraso_assumido_dias": "Atraso assumido (dias)",
+    "choque_demanda_pct": "Alteração de demanda (%)",
+    "custo_cenario_base": "Custo no cenário base",
+    "diferenca_custo_base": "Diferença para o cenário base",
+    "premissa_estresse": "Premissas do cenário",
+    "janela": "Período histórico",
     "abc_provisoria": "ABC provisória",
     "dias_cobertos": "Dias cobertos na janela",
     "janela_dias": "Janela ABC (dias)",
@@ -138,7 +172,15 @@ def tabela(frame, columns=None):
     view = frame.copy()
     if columns:
         view = view[[column for column in columns if column in view]]
-    for campo in ("status", "status_previsao", "status_agendamento", "prioridade"):
+    for campo in (
+        "status",
+        "status_previsao",
+        "status_agendamento",
+        "prioridade",
+        "situacao_dados",
+        "status_orcamento",
+        "tipo_compra",
+    ):
         if campo in view:
             view[campo] = view[campo].map(
                 lambda v: (

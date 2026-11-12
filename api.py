@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import date
+from decimal import Decimal
 import hmac
 import os
 from pathlib import Path
@@ -51,6 +52,15 @@ class AnalysisRequest(RequestModel):
     custo_pedido: float = Field(default=1.0, strict=True, ge=0, allow_inf_nan=False)
     janela_classificacao: int = Field(default=90, strict=True, ge=1, le=3650)
     numero_periodos_simulacao: int = Field(default=1, strict=True, ge=1, le=6)
+    orcamento_compras: Decimal | None = Field(
+        default=None, ge=0, max_digits=14, decimal_places=2
+    )
+    custos_unitarios: dict[str, Decimal] | None = None
+    avaliar_estresse: StrictBool = False
+    atraso_fornecedor_dias: int = Field(default=3, strict=True, ge=0, le=30)
+    choque_demanda_pct: float = Field(
+        default=20.0, strict=True, ge=0, le=80, allow_inf_nan=False
+    )
 
 
 class ActualsRequest(RequestModel):
@@ -92,7 +102,7 @@ def create_app(db_path=None):
 
     application = FastAPI(
         title="StockMind-AI",
-        version="0.5.0",
+        version="0.6.0",
         lifespan=lifespan,
         description="Previsões e planejamento local. A aplicação não realiza compras.",
     )
@@ -234,6 +244,11 @@ def create_app(db_path=None):
             custo_pedido=body.custo_pedido,
             janela_classificacao=body.janela_classificacao,
             numero_periodos_simulacao=body.numero_periodos_simulacao,
+            orcamento_compras=body.orcamento_compras,
+            custos_unitarios=body.custos_unitarios,
+            avaliar_estresse=body.avaliar_estresse,
+            atraso_fornecedor_dias=body.atraso_fornecedor_dias,
+            choque_demanda_pct=body.choque_demanda_pct,
         )
         run_id = store().save_run(
             result,
@@ -259,6 +274,17 @@ def create_app(db_path=None):
                 "custo_pedido": body.custo_pedido,
                 "janela_classificacao": body.janela_classificacao,
                 "numero_periodos_simulacao": body.numero_periodos_simulacao,
+                "orcamento_compras": str(body.orcamento_compras)
+                if body.orcamento_compras is not None
+                else None,
+                "custos_unitarios": {
+                    k: str(v) for k, v in body.custos_unitarios.items()
+                }
+                if body.custos_unitarios is not None
+                else None,
+                "avaliar_estresse": body.avaliar_estresse,
+                "atraso_fornecedor_dias": body.atraso_fornecedor_dias,
+                "choque_demanda_pct": body.choque_demanda_pct,
             },
         )
         return {"id": run_id, "resultado": result}
