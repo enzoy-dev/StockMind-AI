@@ -1,0 +1,10 @@
+perfil,horizonte,series_avaliadas,series_superaram_referencia
+intermitente,7,3,0
+intermitente,14,3,2
+intermitente,30,3,1
+variavel,7,3,0
+variavel,14,3,1
+variavel,30,3,2
+volume_alto,7,3,2
+volume_alto,14,3,2
+volume_alto,30,3,1

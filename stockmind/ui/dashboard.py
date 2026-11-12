@@ -18,6 +18,7 @@ from .decisions import mostrar_decisoes
 from .scenarios import mostrar_cenarios
 from .evaluation import mostrar_avaliacao
 from .quality import mostrar_qualidade
+from .purchasing import parametros_orcamento
 
 
 def main():
@@ -125,6 +126,7 @@ def main():
             )
         }
         if produtos is not None:
+            avancado.update(parametros_orcamento(produtos))
             with st.expander(
                 "Segurança calculada, entregas históricas e avaliação da reposição"
             ):
@@ -148,6 +150,25 @@ def main():
                 simular = st.checkbox(
                     "Avaliar políticas de reposição no histórico", value=False
                 )
+                estressar = st.checkbox(
+                    "Simular atrasos e mudanças de demanda", value=False
+                )
+                avancado["avaliar_estresse"] = estressar
+                if estressar:
+                    st.caption(
+                        "Prazo ampliado é assumido e conhecido no cenário. A demanda muda no bloco avaliado, revelada a cada fechamento. Não é previsão de atraso nem retorno financeiro."
+                    )
+                    avancado["atraso_fornecedor_dias"] = int(
+                        st.number_input(
+                            "Atraso assumido do fornecedor (dias)",
+                            min_value=0,
+                            max_value=30,
+                            value=3,
+                        )
+                    )
+                    avancado["choque_demanda_pct"] = float(
+                        st.slider("Choque de demanda no replay (%)", 0, 80, 20)
+                    )
                 avancado.update(
                     {
                         "entregas": entregas,
@@ -156,7 +177,7 @@ def main():
                         "avaliar_reposicao": simular,
                     }
                 )
-                if simular:
+                if simular or estressar:
                     st.info(
                         "Replay com estoque inicial e parâmetros manuais do catálogo como cenário declarado. Não reconstrói o estoque real passado; custos abaixo são premissas em unidades monetárias."
                     )

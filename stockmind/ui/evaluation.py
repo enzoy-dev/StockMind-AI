@@ -47,3 +47,20 @@ def mostrar_avaliacao(resultado):
             resultado["diario_multiperiodo"],
             "diario_multiperiodo.csv",
         )
+
+    if resultado.get("avaliacao_estresse"):
+        st.subheader("Políticas sob atrasos e mudanças de demanda")
+        st.caption(
+            "Base, prazo ampliado, demanda maior/menor e combinado. Estoque reinicia por janela; premissas conhecidas e custos assumidos, sem ROI comprovado. Não altera a recomendação operacional."
+        )
+        tabela(pd.DataFrame(resultado["avaliacao_estresse"]))
+        baixar(
+            "Baixar avaliação de estresse",
+            resultado["avaliacao_estresse"],
+            "estresse.csv",
+        )
+        baixar(
+            "Baixar diário de estresse",
+            resultado["diario_estresse"],
+            "diario_estresse.csv",
+        )

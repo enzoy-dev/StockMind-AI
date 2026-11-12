@@ -20,7 +20,57 @@ SHA256 = "43465a06f2ccf7c8b5bd2892bc7defb52f97487934fe93b16ae4c3936424676d"
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def prepare(raw, products=3):
+def selecionar_perfis(frame, start, cut, products=9):
+    if type(products) is not int or not 3 <= products <= 60:
+        raise ValueError("Recorte estratificado exige de 3 a 60 produtos.")
+    training = frame.loc[frame.InvoiceDate.lt(cut + pd.Timedelta(days=1))].copy()
+    training["dia"] = training.InvoiceDate.dt.normalize()
+    daily = training.groupby(["StockCode", "dia"]).Quantity.sum()
+    table = daily.groupby(level=0).agg(["sum", "count"])
+    days = (cut - start).days + 1
+    table["media_treino"] = table["sum"] / days
+    second = daily.pow(2).groupby(level=0).sum() / days
+    table["cv_treino"] = (second - table.media_treino.pow(2)).clip(lower=0).pow(
+        0.5
+    ) / table.media_treino
+    table["fracao_dias_sem_fatura"] = 1 - table["count"] / days
+    # Evita selecionar produtos com pouquíssimos eventos por um CV extremo.
+    table = table.loc[table["count"].ge(28)].sort_index()
+    selected, profiles = [], []
+    for index, (profile, field) in enumerate(
+        [
+            ("volume_alto", "sum"),
+            ("intermitente", "fracao_dias_sem_fatura"),
+            ("variavel", "cv_treino"),
+        ]
+    ):
+        quota = products // 3 + (index < products % 3)
+        available = table.loc[~table.index.isin(selected)].sort_values(
+            [field] + ([] if field == "sum" else ["sum"]),
+            ascending=False,
+            kind="stable",
+        )
+        if len(available) < quota:
+            raise ValueError(
+                "Produtos elegíveis insuficientes para os perfis solicitados."
+            )
+        for sku, row in available.head(quota).iterrows():
+            selected.append(sku)
+            profiles.append(
+                {
+                    "sku": sku,
+                    "perfil": profile,
+                    "unidades_treino": int(row["sum"]),
+                    "dias_com_fatura_treino": int(row["count"]),
+                    "media_treino": float(row.media_treino),
+                    "cv_treino": float(row.cv_treino),
+                    "fracao_dias_sem_fatura": float(row.fracao_dias_sem_fatura),
+                }
+            )
+    return selected, profiles
+
+
+def prepare(raw, products=3, estratificado=False):
     """Seleção de SKUs só no prefixo anterior aos últimos90dias.
 
     Datas sem fatura viram zero VENDAS REGISTRADAS no extrato completo, não demanda.
@@ -55,7 +105,13 @@ def prepare(raw, products=3):
         .sort_index()
         .sort_values(ascending=False, kind="stable")
     )
-    skus = ranked.head(products).index.tolist()
+    if type(products) is not int or products < 1:
+        raise ValueError("Quantidade de produtos deve ser inteira positiva.")
+    profiles = []
+    if estratificado:
+        skus, profiles = selecionar_perfis(frame, start, cut, products)
+    else:
+        skus = ranked.head(products).index.tolist()
     daily = (
         frame.assign(data=frame.InvoiceDate.dt.normalize())
         .groupby(["StockCode", "data"])
@@ -77,6 +133,10 @@ def prepare(raw, products=3):
         "corte_selecao_skus": str(cut.date()),
         "skus": skus,
         "dias": (end - start).days + 1,
+        "perfis_treino": profiles,
+        "selecao": "perfis somente no treino"
+        if estratificado
+        else "volume somente no treino",
     }
 
 
@@ -87,6 +147,8 @@ def main():
     )
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--output", type=Path, default=ROOT / "reports/uci_retail")
+    parser.add_argument("--estratificado", action="store_true")
+    parser.add_argument("--products", type=int, default=None)
     args = parser.parse_args()
     if args.download and not args.input.exists():
         args.input.parent.mkdir(parents=True, exist_ok=True)
@@ -104,12 +166,30 @@ def main():
     raw = pd.read_excel(
         args.input, engine="openpyxl", dtype={"StockCode": str, "InvoiceNo": str}
     )
-    sales, metadata = prepare(raw)
+    sales, metadata = prepare(
+        raw,
+        products=args.products
+        if args.products is not None
+        else (9 if args.estratificado else 3),
+        estratificado=args.estratificado,
+    )
     metrics = comparar_horizontes(sales)
     args.output.mkdir(parents=True, exist_ok=True)
     sales.assign(data=sales.data.dt.strftime("%Y-%m-%d")).to_csv(
         args.output / "vendas_agregadas.csv", index=False
     )
+    if metadata["perfis_treino"]:
+        profiles = pd.DataFrame(metadata["perfis_treino"])
+        profiles.to_csv(args.output / "perfis_treino.csv", index=False)
+        metrics = metrics.merge(
+            profiles[["sku", "perfil"]], on="sku", validate="many_to_one"
+        )
+        valid = metrics.loc[metrics.ganho_mae_teste_pct.notna()].copy()
+        valid["superou_referencia"] = valid.ganho_mae_teste_pct.gt(0)
+        valid.groupby(["perfil", "horizonte"]).agg(
+            series_avaliadas=("sku", "size"),
+            series_superaram_referencia=("superou_referencia", "sum"),
+        ).reset_index().to_csv(args.output / "resumo_perfis.csv", index=False)
     metrics.to_csv(args.output / "metricas.csv", index=False)
     metadata["hash_motor_previsao"] = hashlib.sha256(
         (ROOT / "stockmind/forecasting.py").read_bytes()
@@ -123,7 +203,7 @@ def main():
             "licenca_url": "https://creativecommons.org/licenses/by/4.0/",
             "mirror": MIRROR,
             "sha256": digest,
-            "transformacoes": "Remove cancelamentos, quantidades/preços não positivos e códigos não-produto. Seleciona 3 SKUs no treino. Agrega vendas diárias; ausência de fatura=zero registrado. Sem preço futuro ou disponibilidade.",
+            "transformacoes": "Remove cancelamentos, quantidades/preços não positivos e códigos não-produto. Seleção de SKUs somente no treino, conforme metadados. Agrega vendas diárias; ausência de fatura=zero registrado. Sem preço futuro ou disponibilidade.",
             "objetivo": "Previsão de vendas registradas, não demanda não atendida ou ROI.",
             "horizontes": [7, 14, 30],
         }

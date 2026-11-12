@@ -121,6 +121,11 @@ class TestAPI(unittest.TestCase):
                 "custo_pedido": 1.0,
                 "janela_classificacao": 90,
                 "numero_periodos_simulacao": 1,
+                "orcamento_compras": None,
+                "custos_unitarios": None,
+                "avaliar_estresse": False,
+                "atraso_fornecedor_dias": 3,
+                "choque_demanda_pct": 20.0,
             },
         )
         self.assertEqual(len(snapshot["resultado"]["previsoes"]), 7)

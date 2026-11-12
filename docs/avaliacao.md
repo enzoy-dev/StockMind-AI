@@ -115,8 +115,9 @@ exatamente a mesma dificuldade. Um método novo pode perder para a referência.
 
 ## Limites atuais
 
-Ainda faltam avaliação em dados reais de origem conhecida e validação comercial
-das recomendações. O tratamento de censura, o monitoramento e o replay de políticas
+Há benchmarks recortados de vendas registradas do UCI Online Retail com origem
+e licença documentadas. Ainda faltam validação operacional e comercial das
+recomendações com dados de estoque e compras. O tratamento de censura, o monitoramento e o replay de políticas
 são ferramentas de estudo com premissas explícitas; não recuperam demanda perdida
 nem demonstram economia real.
 Não há múltiplos depósitos, perecibilidade, calendário de compras otimizado ou

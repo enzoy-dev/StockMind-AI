@@ -4,6 +4,7 @@ from stockmind.data import (
     validar_planejamento,
 )
 from .components import tabela, baixar, precisam_revisao
+from .purchasing import mostrar_compras
 
 
 def mostrar_decisoes(resultado, vendas, produtos, fornecedores, pedidos, store):
@@ -171,3 +172,5 @@ def mostrar_decisoes(resultado, vendas, produtos, fornecedores, pedidos, store):
             resultado["prazos_fornecedores"],
             "prazos.csv",
         )
+
+    mostrar_compras(resultado)

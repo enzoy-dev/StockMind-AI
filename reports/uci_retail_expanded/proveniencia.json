@@ -1,0 +1,119 @@
+{
+  "bordas_descartadas": "Primeiro e último dia excluídos por possível cobertura intradiária parcial.",
+  "linhas_originais": 541909,
+  "linhas_apos_filtros": 520798,
+  "data_inicio": "2010-12-02",
+  "data_fim": "2011-12-08",
+  "corte_selecao_skus": "2011-09-09",
+  "skus": [
+    "23166",
+    "84077",
+    "85099B",
+    "23135",
+    "22866",
+    "22155",
+    "22350",
+    "22702",
+    "22349"
+  ],
+  "dias": 372,
+  "perfis_treino": [
+    {
+      "sku": "23166",
+      "perfil": "volume_alto",
+      "unidades_treino": 76707,
+      "dias_com_fatura_treino": 70,
+      "media_treino": 272.01063829787233,
+      "cv_treino": 16.21690222152001,
+      "fracao_dias_sem_fatura": 0.75177304964539
+    },
+    {
+      "sku": "84077",
+      "perfil": "volume_alto",
+      "unidades_treino": 38002,
+      "dias_com_fatura_treino": 163,
+      "media_treino": 134.75886524822695,
+      "cv_treino": 2.6094377971977494,
+      "fracao_dias_sem_fatura": 0.4219858156028369
+    },
+    {
+      "sku": "85099B",
+      "perfil": "volume_alto",
+      "unidades_treino": 32106,
+      "dias_com_fatura_treino": 221,
+      "media_treino": 113.85106382978724,
+      "cv_treino": 1.3557273957731346,
+      "fracao_dias_sem_fatura": 0.2163120567375887
+    },
+    {
+      "sku": "23135",
+      "perfil": "intermitente",
+      "unidades_treino": 1485,
+      "dias_com_fatura_treino": 28,
+      "media_treino": 5.26595744680851,
+      "cv_treino": 7.54748042523525,
+      "fracao_dias_sem_fatura": 0.900709219858156
+    },
+    {
+      "sku": "22866",
+      "perfil": "intermitente",
+      "unidades_treino": 1138,
+      "dias_com_fatura_treino": 28,
+      "media_treino": 4.035460992907802,
+      "cv_treino": 5.029977069618503,
+      "fracao_dias_sem_fatura": 0.900709219858156
+    },
+    {
+      "sku": "22155",
+      "perfil": "intermitente",
+      "unidades_treino": 606,
+      "dias_com_fatura_treino": 28,
+      "media_treino": 2.148936170212766,
+      "cv_treino": 5.039876278895919,
+      "fracao_dias_sem_fatura": 0.900709219858156
+    },
+    {
+      "sku": "22350",
+      "perfil": "variavel",
+      "unidades_treino": 1237,
+      "dias_com_fatura_treino": 64,
+      "media_treino": 4.386524822695035,
+      "cv_treino": 12.214836414898013,
+      "fracao_dias_sem_fatura": 0.7730496453900709
+    },
+    {
+      "sku": "22702",
+      "perfil": "variavel",
+      "unidades_treino": 1342,
+      "dias_com_fatura_treino": 37,
+      "media_treino": 4.75886524822695,
+      "cv_treino": 11.220239213325472,
+      "fracao_dias_sem_fatura": 0.8687943262411347
+    },
+    {
+      "sku": "22349",
+      "perfil": "variavel",
+      "unidades_treino": 1141,
+      "dias_com_fatura_treino": 60,
+      "media_treino": 4.046099290780142,
+      "cv_treino": 11.171089641379519,
+      "fracao_dias_sem_fatura": 0.7872340425531915
+    }
+  ],
+  "selecao": "perfis somente no treino",
+  "hash_motor_previsao": "77dc0710f40888ce5bc4fe6ce164077632807258e5caadf0ac0b369970c937a1",
+  "fonte": "https://archive.ics.uci.edu/dataset/352/online+retail",
+  "doi": "10.24432/C5BW33",
+  "citacao": "Chen, D. (2015). Online Retail. UCI Machine Learning Repository.",
+  "licenca_dados": "CC BY 4.0",
+  "licenca_url": "https://creativecommons.org/licenses/by/4.0/",
+  "mirror": "https://github.com/mrinmaisharma/Online-Retail-Dataset/raw/86f29b80be8887d6af5c5b603864e7cf2fe3caf0/OnlineRetail.xlsx",
+  "sha256": "43465a06f2ccf7c8b5bd2892bc7defb52f97487934fe93b16ae4c3936424676d",
+  "transformacoes": "Remove cancelamentos, quantidades/preços não positivos e códigos não-produto. Seleção de SKUs somente no treino, conforme metadados. Agrega vendas diárias; ausência de fatura=zero registrado. Sem preço futuro ou disponibilidade.",
+  "objetivo": "Previsão de vendas registradas, não demanda não atendida ou ROI.",
+  "horizontes": [
+    7,
+    14,
+    30
+  ]
+}
